@@ -1286,12 +1286,6 @@ async def _bs_save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=_view_panel_keyboard(key),
     )
-    # Also send the updated view panel
-    await update.message.reply_text(
-        _view_panel_text(key),
-        parse_mode="HTML",
-        reply_markup=_view_panel_keyboard(key),
-    )
 
 
 async def _bs_save_btn_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
