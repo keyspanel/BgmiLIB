@@ -20,6 +20,23 @@ MESSAGES_FILE = "messages.json"
 MAX_HISTORY   = 10
 
 # ─────────────────────────────────────────────────────────────
+# BOTSETTINGS — wizard step constants
+# ─────────────────────────────────────────────────────────────
+BS_IDLE      = "idle"
+BS_EDIT_TEXT = "edit_text"
+BS_BTN_TEXT  = "btn_text"
+BS_BTN_URL   = "btn_url"
+BS_BTN_EMOJI = "btn_emoji"
+
+STYLE_OPTIONS = ["default", "primary", "success", "danger"]
+STYLE_LABEL   = {
+    "default": "⬜ Default",
+    "primary": "🔵 Primary",
+    "success": "🟢 Success",
+    "danger":  "🔴 Danger",
+}
+
+# ─────────────────────────────────────────────────────────────
 # MESSAGE TEMPLATES  (owner-editable via /botsettings)
 # Variables:
 #   start          → {mention}  {first_name}
@@ -87,15 +104,27 @@ DEFAULT_MESSAGES = {
 
 # Human-readable labels + available vars per key
 MSG_META = {
-    "start":          ("🚀 Start",           "{mention}  {first_name}"),
-    "found":          ("✅ Player Found",     "{username}  {uid}  {server}"),
-    "not_found":      ("💀 UID Not Found",    "{uid}"),
-    "invalid_uid":    ("⚠️ Invalid UID",      "—"),
-    "searching":      ("🔍 Searching",        "—"),
-    "conn_failed":    ("❌ Conn. Failed",     "—"),
-    "history_header": ("📜 History Header",   "{count}  {max}"),
-    "history_item":   ("⭐ History Item",     "{num}  {username}  {uid}"),
-    "history_empty":  ("📭 History Empty",    "—"),
+    "start":          ("🚀 Start",           ["{mention}", "{first_name}"]),
+    "found":          ("✅ Player Found",     ["{username}", "{uid}", "{server}"]),
+    "not_found":      ("💀 UID Not Found",    ["{uid}"]),
+    "invalid_uid":    ("⚠️ Invalid UID",      []),
+    "searching":      ("🔍 Searching",        []),
+    "conn_failed":    ("❌ Conn. Failed",     []),
+    "history_header": ("📜 History Header",   ["{count}", "{max}"]),
+    "history_item":   ("⭐ History Item",     ["{num}", "{username}", "{uid}"]),
+    "history_empty":  ("📭 History Empty",    []),
+}
+
+# Sample values for preview rendering
+SAMPLE = {
+    "mention":    '<a href="tg://user?id=0">DarkFury</a>',
+    "first_name": "DarkFury",
+    "username":   "BGMI_PLAYER",
+    "uid":        "5123456789",
+    "server":     "BGMI — India",
+    "count":      "3",
+    "max":        str(MAX_HISTORY),
+    "num":        "1",
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -107,7 +136,6 @@ def load_messages() -> dict:
         try:
             with open(MESSAGES_FILE, "r", encoding="utf-8") as f:
                 stored = json.load(f)
-            # fill any missing keys with defaults
             return {**DEFAULT_MESSAGES, **stored}
         except Exception:
             pass
@@ -120,12 +148,79 @@ def save_messages(data: dict):
 
 
 def get_msg(key: str, **kwargs) -> str:
-    """Render a message template with the given variables."""
     tmpl = load_messages().get(key, DEFAULT_MESSAGES.get(key, ""))
     try:
         return tmpl.format(**kwargs)
     except KeyError:
         return tmpl
+
+
+# ─────────────────────────────────────────────────────────────
+# INLINE BUTTON STORE  (per-message-key)
+# Stored in messages.json as "{key}_buttons" → JSON array
+# Each item: {"text": "...", "url": "...", "style": "primary",
+#             "icon_custom_emoji_id": "..."}
+# ─────────────────────────────────────────────────────────────
+
+def _btn_key(key: str) -> str:
+    return f"{key}_buttons"
+
+
+def load_buttons(key: str) -> list[dict]:
+    raw = load_messages().get(_btn_key(key), "")
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
+
+
+def save_buttons(key: str, buttons: list[dict]):
+    msgs = load_messages()
+    msgs[_btn_key(key)] = json.dumps(buttons, ensure_ascii=False)
+    save_messages(msgs)
+
+
+def build_inline_keyboard(key: str) -> InlineKeyboardMarkup | None:
+    """Build InlineKeyboardMarkup from saved buttons for a message key."""
+    buttons = load_buttons(key)
+    if not buttons:
+        return None
+    rows = []
+    for btn in buttons:
+        text = btn.get("text", "").strip()
+        url  = btn.get("url", "").strip()
+        if not text or not url:
+            continue
+        api_kwargs = {}
+        style = btn.get("style", "").strip()
+        if style in ("primary", "success", "danger"):
+            api_kwargs["style"] = style
+        emoji_id = btn.get("icon_custom_emoji_id", "").strip()
+        if emoji_id:
+            api_kwargs["icon_custom_emoji_id"] = emoji_id
+        rows.append([InlineKeyboardButton(
+            text=text, url=url,
+            api_kwargs=api_kwargs if api_kwargs else None,
+        )])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _buttons_summary(buttons: list[dict]) -> str:
+    if not buttons:
+        return "  <i>No buttons configured.</i>"
+    lines = []
+    for i, b in enumerate(buttons, 1):
+        style_tag = f" [{b.get('style') or 'default'}]"
+        emoji_tag = f" 🎨" if b.get("icon_custom_emoji_id") else ""
+        lines.append(
+            f"  <b>{i}.</b> {escape(b.get('text',''))} "
+            f"→ <code>{escape(b.get('url',''))}</code>"
+            f"{style_tag}{emoji_tag}"
+        )
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -162,7 +257,7 @@ def get_history(user_id) -> list:
 
 
 # ─────────────────────────────────────────────────────────────
-# BGMI LOOKUP CORE  (github.com/anubhavanonymous/bgmi-id-info)
+# BGMI LOOKUP CORE
 # ─────────────────────────────────────────────────────────────
 
 def _get_token(session) -> str | None:
@@ -220,32 +315,138 @@ def is_valid_uid(text: str) -> bool:
 
 
 def is_owner(update: Update) -> bool:
-    return OWNER_ID and update.effective_user.id == OWNER_ID
+    return bool(OWNER_ID and update.effective_user.id == OWNER_ID)
 
 
-def settings_keyboard() -> InlineKeyboardMarkup:
+def _capture_html(msg) -> str:
+    """Capture message preserving all Telegram formatting (bold, italic, custom emoji, etc.)."""
+    try:
+        html = getattr(msg, "text_html", None) or getattr(msg, "caption_html", None)
+        if html is not None:
+            return html.strip()
+    except Exception:
+        pass
+    return (msg.text or msg.caption or "").strip()
+
+
+def _bs_clear(ud: dict):
+    """Clear all botsettings wizard state from user_data."""
+    for k in ("bs_step", "bs_key", "bs_current_btn", "bs_prompt_msg_id"):
+        ud.pop(k, None)
+
+
+# ─────────────────────────────────────────────────────────────
+# BOTSETTINGS — UI builders
+# ─────────────────────────────────────────────────────────────
+
+def _main_menu_keyboard() -> InlineKeyboardMarkup:
     keys = list(MSG_META.keys())
     rows = []
     for i in range(0, len(keys), 2):
         row = []
         for k in keys[i:i+2]:
             label, _ = MSG_META[k]
-            row.append(InlineKeyboardButton(label, callback_data=f"s_edit_{k}"))
+            btn_count = len(load_buttons(k))
+            suffix = f" 🔘{btn_count}" if btn_count else ""
+            row.append(InlineKeyboardButton(f"{label}{suffix}", callback_data=f"s_v_{k}"))
         rows.append(row)
-    rows.append([InlineKeyboardButton("🔒 Close", callback_data="s_close")])
+    rows.append([InlineKeyboardButton("❌ Close", callback_data="s_close")])
     return InlineKeyboardMarkup(rows)
 
 
-SAMPLE = {
-    "mention":    '<a href="tg://user?id=0">DarkFury</a>',
-    "first_name": "DarkFury",
-    "username":   "BGMI_PLAYER",
-    "uid":        "5123456789",
-    "server":     "BGMI — India",
-    "count":      "3",
-    "max":        str(MAX_HISTORY),
-    "num":        "1",
-}
+def _view_panel_text(key: str) -> str:
+    label, vars_list = MSG_META[key]
+    current = load_messages().get(key, DEFAULT_MESSAGES.get(key, ""))
+    buttons = load_buttons(key)
+
+    var_line = ""
+    if vars_list:
+        var_line = "\n📌 <b>Variables:</b>  " + "  ".join(f"<code>{v}</code>" for v in vars_list) + "\n"
+
+    btn_section = (
+        f"\n🔘 <b>Buttons ({len(buttons)}):</b>\n"
+        f"{_buttons_summary(buttons)}\n"
+    ) if buttons else "\n🔘 <b>Buttons:</b>  <i>None</i>\n"
+
+    return (
+        f"⚙️ <b>{label}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📄 <b>Current Message:</b>\n"
+        f"<blockquote>{escape(current)}</blockquote>\n"
+        f"{var_line}"
+        f"{btn_section}"
+    )
+
+
+def _view_panel_keyboard(key: str) -> InlineKeyboardMarkup:
+    buttons = load_buttons(key)
+    rows = [
+        [
+            InlineKeyboardButton("✏️ Edit Text",      callback_data=f"s_et_{key}"),
+            InlineKeyboardButton("🔘 Manage Buttons", callback_data=f"s_mb_{key}"),
+        ],
+        [
+            InlineKeyboardButton("👁️ Preview",        callback_data=f"s_pv_{key}"),
+            InlineKeyboardButton("🔄 Reset Text",     callback_data=f"s_rt_{key}"),
+        ],
+    ]
+    if buttons:
+        rows.append([InlineKeyboardButton("🗑️ Clear All Buttons", callback_data=f"s_rb_{key}")])
+    rows.append([
+        InlineKeyboardButton("◀️ Back",  callback_data="s_back"),
+        InlineKeyboardButton("❌ Close", callback_data="s_close"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _manage_buttons_keyboard(key: str) -> InlineKeyboardMarkup:
+    buttons = load_buttons(key)
+    rows = []
+    for i, b in enumerate(buttons):
+        style_tag = f" [{b.get('style') or 'default'}]"
+        label_txt = escape(b.get("text", f"Button {i+1}"))
+        rows.append([
+            InlineKeyboardButton(f"🔘 {label_txt}{style_tag}", callback_data=f"s_noop"),
+            InlineKeyboardButton(f"🗑️ #{i+1}",                callback_data=f"s_db_{key}_{i}"),
+        ])
+    rows.append([InlineKeyboardButton("➕ Add Button", callback_data=f"s_ab_{key}")])
+    rows.append([
+        InlineKeyboardButton("◀️ Back to Settings", callback_data=f"s_v_{key}"),
+        InlineKeyboardButton("❌ Close",             callback_data="s_close"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _manage_buttons_text(key: str) -> str:
+    label, _ = MSG_META[key]
+    buttons   = load_buttons(key)
+    count     = len(buttons)
+    return (
+        f"🔘 <b>Button Manager — {label}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>Configured buttons ({count}/10):</b>\n"
+        f"{_buttons_summary(buttons)}\n\n"
+        "<b>How to add buttons:</b>\n"
+        "Tap <b>➕ Add Button</b> and follow the steps:\n"
+        "  1️⃣  Button label text\n"
+        "  2️⃣  Destination URL\n"
+        "  3️⃣  Button style (colour)\n"
+        "  4️⃣  Custom emoji icon (optional)\n\n"
+        "<i>Buttons appear below the bot reply when users trigger it.</i>"
+    )
+
+
+def _style_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⬜ Default", callback_data="s_bs_default"),
+            InlineKeyboardButton("🔵 Primary", callback_data="s_bs_primary"),
+        ],
+        [
+            InlineKeyboardButton("🟢 Success", callback_data="s_bs_success"),
+            InlineKeyboardButton("🔴 Danger",  callback_data="s_bs_danger"),
+        ],
+    ])
 
 
 # ─────────────────────────────────────────────────────────────
@@ -253,23 +454,27 @@ SAMPLE = {
 # ─────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+    user    = update.effective_user
     mention = f'<a href="tg://user?id={user.id}">{escape(user.first_name)}</a>'
     await update.message.reply_text(
         get_msg("start", mention=mention, first_name=escape(user.first_name)),
         parse_mode="HTML",
+        reply_markup=build_inline_keyboard("start"),
     )
 
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     entries = get_history(update.effective_user.id)
     if not entries:
-        await update.message.reply_text(get_msg("history_empty"), parse_mode="HTML")
+        await update.message.reply_text(
+            get_msg("history_empty"), parse_mode="HTML",
+            reply_markup=build_inline_keyboard("history_empty"),
+        )
         return
 
-    msgs = load_messages()
-    header = msgs.get("history_header", DEFAULT_MESSAGES["history_header"])
-    item_tmpl = msgs.get("history_item", DEFAULT_MESSAGES["history_item"])
+    msgs      = load_messages()
+    header    = msgs.get("history_header", DEFAULT_MESSAGES["history_header"])
+    item_tmpl = msgs.get("history_item",   DEFAULT_MESSAGES["history_item"])
 
     lines = [header, ""]
     for i, e in enumerate(entries, 1):
@@ -284,14 +489,31 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines += ["", "━━━━━━━━━━━━━━━━━━━━",
               f"<i>🛡️ {len(entries)}/{MAX_HISTORY} slots used</i>"]
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="HTML",
+        reply_markup=build_inline_keyboard("history_header"),
+    )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Routes to edit handler (owner in editing mode) or UID lookup."""
-    if is_owner(update) and context.user_data.get("editing_key"):
-        await _save_edit(update, context)
-        return
+    """Routes to settings wizard or UID lookup."""
+    ud      = context.user_data
+    bs_step = ud.get("bs_step", BS_IDLE)
+
+    if is_owner(update):
+        if bs_step == BS_EDIT_TEXT:
+            await _bs_save_text(update, context)
+            return
+        if bs_step == BS_BTN_TEXT:
+            await _bs_save_btn_text(update, context)
+            return
+        if bs_step == BS_BTN_URL:
+            await _bs_save_btn_url(update, context)
+            return
+        if bs_step == BS_BTN_EMOJI:
+            await _bs_save_btn_emoji(update, context)
+            return
+
     await _lookup_uid(update, context)
 
 
@@ -303,6 +525,7 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             get_msg("invalid_uid"),
             parse_mode="HTML",
             reply_to_message_id=update.message.message_id,
+            reply_markup=build_inline_keyboard("invalid_uid"),
         )
         return
 
@@ -323,18 +546,21 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     server="BGMI — India"),
             parse_mode="HTML",
             reply_to_message_id=update.message.message_id,
+            reply_markup=build_inline_keyboard("found"),
         )
     elif status == "token_failed":
         await update.message.reply_text(
             get_msg("conn_failed"),
             parse_mode="HTML",
             reply_to_message_id=update.message.message_id,
+            reply_markup=build_inline_keyboard("conn_failed"),
         )
     else:
         await update.message.reply_text(
             get_msg("not_found", uid=escape(text)),
             parse_mode="HTML",
             reply_to_message_id=update.message.message_id,
+            reply_markup=build_inline_keyboard("not_found"),
         )
 
 
@@ -346,107 +572,344 @@ async def cmd_botsettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update):
         await update.message.reply_text("⛔ <b>Owner only.</b>", parse_mode="HTML")
         return
-    context.user_data.pop("editing_key", None)
+    _bs_clear(context.user_data)
     await update.message.reply_text(
         "🛠 <b>Bot Settings</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Tap any reply below to <b>view and edit</b> it.\n"
-        "Changes go live <b>instantly</b> for all users.",
+        "Tap any reply to <b>view, edit text, or manage buttons</b>.\n"
+        "Changes go live <b>instantly</b> for all users.\n\n"
+        "<i>🔘N = number of inline buttons configured.</i>",
         parse_mode="HTML",
-        reply_markup=settings_keyboard(),
+        reply_markup=_main_menu_keyboard(),
+    )
+
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
+        return
+    ud      = context.user_data
+    bs_step = ud.get("bs_step", BS_IDLE)
+    bs_key  = ud.get("bs_key")
+
+    if bs_step in (BS_BTN_TEXT, BS_BTN_URL, BS_BTN_EMOJI):
+        ud["bs_step"] = BS_IDLE
+        ud.pop("bs_current_btn", None)
+        ud.pop("bs_prompt_msg_id", None)
+        if bs_key:
+            await update.message.reply_text(
+                "↩️ <b>Button adding cancelled.</b>",
+                parse_mode="HTML",
+                reply_markup=_manage_buttons_keyboard(bs_key),
+            )
+            await update.message.reply_text(
+                _manage_buttons_text(bs_key),
+                parse_mode="HTML",
+                reply_markup=_manage_buttons_keyboard(bs_key),
+            )
+        return
+
+    _bs_clear(ud)
+    await update.message.reply_text(
+        "↩️ <b>Cancelled.</b>",
+        parse_mode="HTML",
+        reply_markup=_main_menu_keyboard(),
     )
 
 
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
+    q  = update.callback_query
+    ud = context.user_data
     await q.answer()
 
     if not (OWNER_ID and q.from_user.id == OWNER_ID):
         await q.answer("⛔ Owner only.", show_alert=True)
         return
 
-    data = q.data
+    data = q.data or ""
+
+    # ── No-op (display-only buttons) ──
+    if data == "s_noop":
+        return
 
     # ── Close ──
     if data == "s_close":
-        await q.message.delete()
-        context.user_data.pop("editing_key", None)
+        _bs_clear(ud)
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
         return
 
-    # ── Select message to edit ──
-    if data.startswith("s_edit_"):
-        key = data[len("s_edit_"):]
+    # ── Back to main menu ──
+    if data == "s_back":
+        _bs_clear(ud)
+        try:
+            await q.message.edit_text(
+                "🛠 <b>Bot Settings</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Tap any reply to <b>view, edit text, or manage buttons</b>.\n"
+                "Changes go live <b>instantly</b> for all users.\n\n"
+                "<i>🔘N = number of inline buttons configured.</i>",
+                parse_mode="HTML",
+                reply_markup=_main_menu_keyboard(),
+            )
+        except Exception:
+            pass
+        return
+
+    # ── View panel ──
+    m = re.match(r"^s_v_(.+)$", data)
+    if m:
+        key = m.group(1)
         if key not in MSG_META:
             return
+        _bs_clear(ud)
+        try:
+            await q.message.edit_text(
+                _view_panel_text(key),
+                parse_mode="HTML",
+                reply_markup=_view_panel_keyboard(key),
+            )
+        except Exception:
+            pass
+        return
 
-        label, avail_vars = MSG_META[key]
-        current = load_messages().get(key, DEFAULT_MESSAGES.get(key, ""))
+    # ── Edit text ──
+    m = re.match(r"^s_et_(.+)$", data)
+    if m:
+        key = m.group(1)
+        if key not in MSG_META:
+            return
+        label, vars_list = MSG_META[key]
 
-        context.user_data["editing_key"]     = key
-        context.user_data["editing_msg_id"]  = q.message.message_id
-        context.user_data["editing_chat_id"] = q.message.chat_id
+        ud["bs_step"] = BS_EDIT_TEXT
+        ud["bs_key"]  = key
 
-        var_line = (
-            f"📌 <b>Available variables:</b>\n<code>{avail_vars}</code>\n\n"
-            if avail_vars != "—" else ""
-        )
+        var_guide = ""
+        if vars_list:
+            var_guide = (
+                "\n📌 <b>Available variables:</b>\n"
+                + "  ".join(f"<code>{v}</code>" for v in vars_list)
+                + "\n\n"
+                "<b>Variable usage example:</b>\n"
+                "<code>Hey {mention}, welcome to BGMI Lookup!</code>\n\n"
+            )
 
-        # Update the menu message to show context (no keyboard)
-        context_msg = (
+        prompt_text = (
             f"✏️ <b>Editing: {label}</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            "📄 <b>Current message:</b>\n"
-            f"<blockquote>{escape(current)}</blockquote>\n\n"
-            f"{var_line}"
-            "⬇️ <b>Reply to the message below with your new text.</b>\n"
-            "Type /cancel to go back."
+            "<b>Supported formatting:</b>\n"
+            "  • <b>bold</b>  •  <i>italic</i>  •  <u>underline</u>\n"
+            "  • <s>strikethrough</s>  •  <tg-spoiler>spoiler</tg-spoiler>\n"
+            "  • <code>inline code</code>  •  hyperlinks\n"
+            "  • Custom emoji (animated sticker emoji)\n\n"
+            f"{var_guide}"
+            "Reply to this message with your new text.\n"
+            "Send /cancel to go back."
         )
-        await q.message.edit_text(context_msg, parse_mode="HTML")
-
-        # Send a ForceReply prompt the owner must reply to
-        force_msg = await q.message.reply_text(
-            f"✏️ <b>Send new text for:</b> {label}",
+        prompt = await q.message.reply_text(
+            prompt_text,
             parse_mode="HTML",
-            reply_markup=ForceReply(selective=True, input_field_placeholder=f"New text for {label}..."),
+            reply_markup=ForceReply(
+                selective=True,
+                input_field_placeholder=f"New text for {label}…"
+            ),
         )
-        context.user_data["force_reply_msg_id"] = force_msg.message_id
-
-
-async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update):
+        ud["bs_prompt_msg_id"] = prompt.message_id
         return
-    context.user_data.pop("editing_key", None)
-    await update.message.reply_text(
-        "↩️ <b>Edit cancelled.</b>",
-        parse_mode="HTML",
-        reply_markup=settings_keyboard(),
-    )
+
+    # ── Manage buttons panel ──
+    m = re.match(r"^s_mb_(.+)$", data)
+    if m:
+        key = m.group(1)
+        if key not in MSG_META:
+            return
+        _bs_clear(ud)
+        try:
+            await q.message.edit_text(
+                _manage_buttons_text(key),
+                parse_mode="HTML",
+                reply_markup=_manage_buttons_keyboard(key),
+            )
+        except Exception:
+            pass
+        return
+
+    # ── Delete button #idx ──
+    m = re.match(r"^s_db_(.+?)_(\d+)$", data)
+    if m:
+        key = m.group(1)
+        idx = int(m.group(2))
+        if key not in MSG_META:
+            return
+        buttons = load_buttons(key)
+        if 0 <= idx < len(buttons):
+            buttons.pop(idx)
+            save_buttons(key, buttons)
+        try:
+            await q.message.edit_text(
+                _manage_buttons_text(key),
+                parse_mode="HTML",
+                reply_markup=_manage_buttons_keyboard(key),
+            )
+        except Exception:
+            pass
+        return
+
+    # ── Add button — start builder ──
+    m = re.match(r"^s_ab_(.+)$", data)
+    if m:
+        key = m.group(1)
+        if key not in MSG_META:
+            return
+        if len(load_buttons(key)) >= 10:
+            await q.answer("⚠️ Maximum 10 buttons per reply.", show_alert=True)
+            return
+        ud["bs_step"]       = BS_BTN_TEXT
+        ud["bs_key"]        = key
+        ud["bs_current_btn"] = {}
+
+        label, _ = MSG_META[key]
+        btn_num  = len(load_buttons(key)) + 1
+        prompt = await q.message.reply_text(
+            f"🔘 <b>Button Builder — {label}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>Step 1 of 3 — Button Label (Button #{btn_num})</b>\n\n"
+            "Reply with the <b>visible text</b> for this button.\n\n"
+            "<b>Examples:</b>\n"
+            "<code>Join Channel</code>\n"
+            "<code>📢 Our Channel</code>\n"
+            "<code>Visit Website</code>\n\n"
+            "<i>Send /cancel to abort.</i>",
+            parse_mode="HTML",
+            reply_markup=ForceReply(
+                selective=True,
+                input_field_placeholder="Type the button label…"
+            ),
+        )
+        ud["bs_prompt_msg_id"] = prompt.message_id
+        return
+
+    # ── Button style chosen ──
+    m = re.match(r"^s_bs_(.+)$", data)
+    if m:
+        style = m.group(1)
+        if style not in STYLE_OPTIONS:
+            style = "default"
+
+        ud.get("bs_current_btn", {})
+        if "bs_current_btn" not in ud:
+            return
+
+        ud["bs_current_btn"]["style"] = style if style != "default" else ""
+        key   = ud.get("bs_key", "")
+        label = MSG_META.get(key, ("Message", []))[0]
+
+        ud["bs_step"] = BS_BTN_EMOJI
+        btn_text = ud["bs_current_btn"].get("text", "")
+        btn_url  = ud["bs_current_btn"].get("url", "")
+
+        prompt = await q.message.reply_text(
+            f"🔘 <b>Button Builder — {label}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "<b>Step 3 of 3 — Custom Emoji Icon (optional)</b>\n\n"
+            f"Button: <b>{escape(btn_text)}</b>\n"
+            f"URL: <code>{escape(btn_url)}</code>\n"
+            f"Style: <b>{STYLE_LABEL.get(style, style)}</b>\n\n"
+            "Send a <b>custom emoji ID</b> to add an icon to the button,\n"
+            "or tap <b>Skip</b> to finish without an icon.\n\n"
+            "<b>How to get emoji ID:</b>\n"
+            "Send the custom emoji in Saved Messages, forward to\n"
+            "@getidsbot and copy the numeric ID.\n\n"
+            "<b>Example ID:</b>\n"
+            "<code>5368324170671202286</code>\n\n"
+            "<i>Send /cancel to abort.</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⏭️ Skip — No Icon", callback_data="s_se")],
+            ]),
+        )
+        ud["bs_prompt_msg_id"] = prompt.message_id
+        return
+
+    # ── Skip emoji ──
+    if data == "s_se":
+        ud.get("bs_current_btn", {})
+        if "bs_current_btn" not in ud:
+            return
+        ud["bs_current_btn"]["icon_custom_emoji_id"] = ""
+        await _bs_finish_button(q.message.chat_id, context)
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        return
+
+    # ── Preview message ──
+    m = re.match(r"^s_pv_(.+)$", data)
+    if m:
+        key = m.group(1)
+        if key not in MSG_META:
+            return
+        await _bs_send_preview(q.message.chat_id, key, context)
+        return
+
+    # ── Reset text to default ──
+    m = re.match(r"^s_rt_(.+)$", data)
+    if m:
+        key = m.group(1)
+        if key not in MSG_META:
+            return
+        msgs = load_messages()
+        msgs.pop(key, None)
+        save_messages(msgs)
+        try:
+            await q.message.edit_text(
+                _view_panel_text(key),
+                parse_mode="HTML",
+                reply_markup=_view_panel_keyboard(key),
+            )
+        except Exception:
+            pass
+        await q.answer("✅ Text reset to default.", show_alert=False)
+        return
+
+    # ── Reset (clear) all buttons ──
+    m = re.match(r"^s_rb_(.+)$", data)
+    if m:
+        key = m.group(1)
+        if key not in MSG_META:
+            return
+        save_buttons(key, [])
+        try:
+            await q.message.edit_text(
+                _view_panel_text(key),
+                parse_mode="HTML",
+                reply_markup=_view_panel_keyboard(key),
+            )
+        except Exception:
+            pass
+        await q.answer("🗑️ All buttons cleared.", show_alert=False)
+        return
 
 
-def _capture_html(msg) -> str:
-    """Capture owner's message preserving all Telegram formatting (bold, italic, custom emoji, etc.)."""
-    try:
-        html = getattr(msg, "text_html", None) or getattr(msg, "caption_html", None)
-        if html is not None:
-            return html.strip()
-    except Exception:
-        pass
-    return (msg.text or msg.caption or "").strip()
+# ─────────────────────────────────────────────────────────────
+# BOTSETTINGS — message capture handlers
+# ─────────────────────────────────────────────────────────────
 
-
-async def _save_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    key      = context.user_data.pop("editing_key", None)
-
+async def _bs_save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ud  = context.user_data
+    key = ud.get("bs_key")
     if not key:
+        _bs_clear(ud)
         return
 
     new_text = _capture_html(update.message)
-
     msgs = load_messages()
     msgs[key] = new_text
     save_messages(msgs)
 
-    label, avail_vars = MSG_META.get(key, (key, "—"))
+    label, vars_list = MSG_META.get(key, (key, []))
 
     # Build preview with sample values
     try:
@@ -454,21 +917,195 @@ async def _save_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except KeyError:
         preview = new_text
 
-    confirm = (
+    _bs_clear(ud)
+
+    await update.message.reply_text(
         f"✅ <b>{label}</b> updated!\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "📄 <b>Preview:</b>\n"
         f"<blockquote>{preview}</blockquote>\n\n"
-        "💾 <i>Changes are live instantly.</i>"
-    )
-    sent = await update.message.reply_text(
-        confirm,
+        "💾 <i>Changes are live instantly.</i>",
         parse_mode="HTML",
-        reply_markup=settings_keyboard(),
+        reply_markup=_view_panel_keyboard(key),
     )
-    # Pin the settings panel to the new message
-    context.user_data["editing_msg_id"]  = sent.message_id
-    context.user_data["editing_chat_id"] = sent.chat_id
+    # Also send the updated view panel
+    await update.message.reply_text(
+        _view_panel_text(key),
+        parse_mode="HTML",
+        reply_markup=_view_panel_keyboard(key),
+    )
+
+
+async def _bs_save_btn_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ud   = context.user_data
+    key  = ud.get("bs_key", "")
+    text = (update.message.text or "").strip()
+
+    if not text:
+        await update.message.reply_text(
+            "⚠️ Button label cannot be empty. Please reply with a button label.",
+            parse_mode="HTML",
+        )
+        return
+
+    ud.setdefault("bs_current_btn", {})["text"] = text
+    ud["bs_step"] = BS_BTN_URL
+
+    label = MSG_META.get(key, ("Message", []))[0]
+    prompt = await update.message.reply_text(
+        f"🔘 <b>Button Builder — {label}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>Step 2 of 3 — Destination URL</b>\n\n"
+        f"Button label: <b>{escape(text)}</b>\n\n"
+        "Reply with the <b>URL</b> this button should open.\n\n"
+        "<b>Accepted formats:</b>\n"
+        "<code>https://t.me/yourchannel</code>\n"
+        "<code>https://example.com/page</code>\n"
+        "<code>tg://resolve?domain=username</code>\n\n"
+        "<i>Send /cancel to abort.</i>",
+        parse_mode="HTML",
+        reply_markup=ForceReply(
+            selective=True,
+            input_field_placeholder="Paste the button URL…"
+        ),
+    )
+    ud["bs_prompt_msg_id"] = prompt.message_id
+
+
+async def _bs_save_btn_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ud  = context.user_data
+    key = ud.get("bs_key", "")
+    url = (update.message.text or "").strip()
+
+    if not re.match(r"^(https?://|tg://)", url):
+        await update.message.reply_text(
+            "⚠️ <b>Invalid URL</b>\n\n"
+            "Must start with <code>https://</code>, <code>http://</code>, or <code>tg://</code>\n\n"
+            "<b>Example:</b>\n"
+            "<code>https://t.me/yourchannel</code>\n\n"
+            "Please reply with a valid URL.",
+            parse_mode="HTML",
+        )
+        return
+
+    ud.setdefault("bs_current_btn", {})["url"] = url
+    ud["bs_step"] = BS_BTN_EMOJI  # will go to style selection first
+
+    label    = MSG_META.get(key, ("Message", []))[0]
+    btn_text = ud["bs_current_btn"].get("text", "")
+
+    await update.message.reply_text(
+        f"🔘 <b>Button Builder — {label}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>Step 3 of 3 — Button Style</b>\n\n"
+        f"Button: <b>{escape(btn_text)}</b>\n"
+        f"URL: <code>{escape(url)}</code>\n\n"
+        "Choose the <b>button style</b> (colour):\n\n"
+        "  <b>⬜ Default</b>  —  Standard style\n"
+        "  <b>🔵 Primary</b>  —  Blue accent\n"
+        "  <b>🟢 Success</b>  —  Green accent\n"
+        "  <b>🔴 Danger</b>   —  Red accent\n\n"
+        "<i>Note: Button colours are visible in supported Telegram clients.</i>",
+        parse_mode="HTML",
+        reply_markup=_style_keyboard(),
+    )
+    # Reset step so style pick is handled by callback, not message handler
+    ud["bs_step"] = BS_IDLE
+
+
+async def _bs_save_btn_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ud       = context.user_data
+    emoji_id = (update.message.text or "").strip()
+
+    if not re.match(r"^\d{5,32}$", emoji_id):
+        await update.message.reply_text(
+            "⚠️ <b>Invalid custom emoji ID</b>\n\n"
+            "Must be a numeric ID (5–32 digits).\n\n"
+            "<b>Example:</b> <code>5368324170671202286</code>\n\n"
+            "Send a valid ID, or tap <b>Skip — No Icon</b>.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⏭️ Skip — No Icon", callback_data="s_se")],
+            ]),
+        )
+        return
+
+    ud.setdefault("bs_current_btn", {})["icon_custom_emoji_id"] = emoji_id
+    await _bs_finish_button(update.message.chat_id, context)
+
+
+async def _bs_finish_button(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    ud  = context.user_data
+    key = ud.get("bs_key", "")
+    btn = dict(ud.get("bs_current_btn", {}))
+
+    if btn.get("text") and btn.get("url"):
+        buttons = load_buttons(key)
+        buttons.append(btn)
+        save_buttons(key, buttons)
+
+    ud.pop("bs_current_btn", None)
+    ud["bs_step"] = BS_IDLE
+
+    label   = MSG_META.get(key, ("Message", []))[0]
+    buttons = load_buttons(key)
+
+    style_name = STYLE_LABEL.get(btn.get("style") or "default", "Default")
+    has_emoji  = "✅" if btn.get("icon_custom_emoji_id") else "❌"
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"✅ <b>Button Added — {label}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>Label:</b>  {escape(btn.get('text', ''))}\n"
+            f"<b>URL:</b>    <code>{escape(btn.get('url', ''))}</code>\n"
+            f"<b>Style:</b>  {style_name}\n"
+            f"<b>Emoji:</b>  {has_emoji}\n\n"
+            f"<b>All buttons for this reply ({len(buttons)}):</b>\n"
+            f"{_buttons_summary(buttons)}\n\n"
+            "💾 <i>Changes are live instantly.</i>"
+        ),
+        parse_mode="HTML",
+        reply_markup=_manage_buttons_keyboard(key),
+    )
+
+
+async def _bs_send_preview(chat_id: int, key: str, context: ContextTypes.DEFAULT_TYPE):
+    label, vars_list = MSG_META[key]
+    tmpl   = load_messages().get(key, DEFAULT_MESSAGES.get(key, ""))
+    markup = build_inline_keyboard(key)
+
+    try:
+        rendered = tmpl.format(**SAMPLE)
+    except KeyError:
+        rendered = tmpl
+
+    header = (
+        f"👁️ <b>Preview: {label}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    if vars_list:
+        header += (
+            "<i>Sample values used:</i>  "
+            + "  ".join(f"<code>{v}</code>" for v in vars_list)
+            + "\n\n"
+        )
+
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=header + rendered,
+            parse_mode="HTML",
+            reply_markup=markup,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"⚠️ <b>Preview render error</b>\n<code>{escape(str(e)[:300])}</code>",
+            parse_mode="HTML",
+        )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -484,10 +1121,10 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start",        cmd_start))
-    app.add_handler(CommandHandler("history",      cmd_history))
-    app.add_handler(CommandHandler("botsettings",  cmd_botsettings))
-    app.add_handler(CommandHandler("cancel",       cmd_cancel))
+    app.add_handler(CommandHandler("start",       cmd_start))
+    app.add_handler(CommandHandler("history",     cmd_history))
+    app.add_handler(CommandHandler("botsettings", cmd_botsettings))
+    app.add_handler(CommandHandler("cancel",      cmd_cancel))
     app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^s_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
