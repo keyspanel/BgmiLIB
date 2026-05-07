@@ -229,17 +229,16 @@ def build_inline_keyboard(key: str) -> InlineKeyboardMarkup | None:
         url  = btn.get("url", "").strip()
         if not text or not url:
             continue
+        # Only pass api_kwargs Telegram actually understands.
+        # 'style' is a local UI label only — never send it to the API.
         api_kwargs = {}
-        style = btn.get("style", "").strip()
-        if style in ("primary", "success", "danger"):
-            api_kwargs["style"] = style
         emoji_id = btn.get("icon_custom_emoji_id", "").strip()
         if emoji_id:
             api_kwargs["icon_custom_emoji_id"] = emoji_id
         entities = _deserialize_entities(btn.get("btn_entities", ""))
         rows.append([InlineKeyboardButton(
             text=text, url=url,
-            entities=entities,
+            entities=entities or None,
             api_kwargs=api_kwargs if api_kwargs else None,
         )])
     return InlineKeyboardMarkup(rows) if rows else None
@@ -259,17 +258,16 @@ def build_found_keyboard(username: str) -> InlineKeyboardMarkup:
         btn_url  = btn.get("url", "").strip()
         if not btn_text or not btn_url:
             continue
+        # Only pass api_kwargs Telegram actually understands.
+        # 'style' is a local UI label only — never send it to the API.
         api_kwargs = {}
-        style    = btn.get("style", "").strip()
         emoji_id = btn.get("icon_custom_emoji_id", "").strip()
-        if style in ("primary", "success", "danger"):
-            api_kwargs["style"] = style
         if emoji_id:
             api_kwargs["icon_custom_emoji_id"] = emoji_id
         entities = _deserialize_entities(btn.get("btn_entities", ""))
         rows.append([InlineKeyboardButton(
             text=btn_text, url=btn_url,
-            entities=entities,
+            entities=entities or None,
             api_kwargs=api_kwargs if api_kwargs else None,
         )])
     return InlineKeyboardMarkup(rows)
@@ -1600,6 +1598,14 @@ async def _bs_send_preview(chat_id: int, key: str, context: ContextTypes.DEFAULT
 # APPLICATION FACTORY  (shared by polling + webhook)
 # ─────────────────────────────────────────────────────────────
 
+async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log all unhandled exceptions so they are never silently swallowed."""
+    import traceback
+    tb = "".join(traceback.format_exception(type(context.error), context.error,
+                                            context.error.__traceback__))
+    print(f"[ERROR] Unhandled exception:\n{tb}", flush=True)
+
+
 def _add_handlers(app: Application) -> None:
     """Register all handlers. Called by both build_app() and main()."""
     app.add_handler(CommandHandler("start",       cmd_start))
@@ -1609,6 +1615,7 @@ def _add_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("cancel",      cmd_cancel))
     app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^s_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(_error_handler)
 
 
 def build_app() -> Application:
