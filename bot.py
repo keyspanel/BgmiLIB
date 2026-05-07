@@ -229,7 +229,7 @@ def build_inline_keyboard(key: str) -> InlineKeyboardMarkup | None:
 def build_found_keyboard(username: str) -> InlineKeyboardMarkup:
     """Build the keyboard for a successful lookup — Copy button first, then owner buttons."""
     copy_btn = InlineKeyboardButton(
-        text="📋 Copy Username",
+        text="Copy Username",
         copy_text=CopyTextButton(text=username),
     )
     rows = [[copy_btn]]
@@ -445,6 +445,27 @@ def get_bgmi_username(user_id: str):
         return None, data.get("message", "Unknown error")
     except Exception as e:
         return None, str(e)
+
+
+# ─────────────────────────────────────────────────────────────
+# RATE LIMITER  (max 5 lookups per user per 60 seconds)
+# ─────────────────────────────────────────────────────────────
+
+_RATE_LIMIT   = 5      # max lookups
+_RATE_WINDOW  = 60     # seconds
+_rate_store: dict[int, list[float]] = {}
+
+
+def _is_rate_limited(user_id: int) -> bool:
+    now  = time.monotonic()
+    hits = _rate_store.get(user_id, [])
+    hits = [t for t in hits if now - t < _RATE_WINDOW]
+    if len(hits) >= _RATE_LIMIT:
+        _rate_store[user_id] = hits
+        return True
+    hits.append(now)
+    _rate_store[user_id] = hits
+    return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -887,6 +908,15 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_to_message_id=update.message.message_id,
             reply_markup=build_inline_keyboard("invalid_uid"),
+        )
+        return
+
+    if _is_rate_limited(user_id):
+        await update.message.reply_text(
+            "⏳ <b>Slow down!</b>\n\nYou can only look up <b>5 UIDs per minute</b>. Please wait a moment and try again.",
+            parse_mode="HTML",
+            reply_to_message_id=update.message.message_id,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         return
 
