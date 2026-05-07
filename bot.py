@@ -3,11 +3,14 @@
 import os
 import re
 import json
+import time
+import asyncio
 import requests
 from html import escape
 from urllib.parse import unquote
 from functools import wraps
 from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, LinkPreviewOptions
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -17,6 +20,9 @@ from storage import load_json, save_json, load_ud, save_ud, del_ud, IS_VERCEL
 
 TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+
+# Thread-pool for running blocking HTTP calls off the asyncio event loop
+_executor = ThreadPoolExecutor(max_workers=8)
 
 HISTORY_FILE   = "history.json"
 MESSAGES_FILE  = "messages.json"
@@ -139,14 +145,23 @@ SAMPLE = {
 }
 
 # ─────────────────────────────────────────────────────────────
-# MESSAGES STORE
+# MESSAGES STORE  (in-memory cache — eliminates repeated DB hits)
 # ─────────────────────────────────────────────────────────────
 
+_msg_cache: dict | None = None
+
+
 def load_messages() -> dict:
-    return load_json("messages", MESSAGES_FILE, DEFAULT_MESSAGES)
+    global _msg_cache
+    if _msg_cache is not None:
+        return _msg_cache
+    _msg_cache = load_json("messages", MESSAGES_FILE, DEFAULT_MESSAGES)
+    return _msg_cache
 
 
 def save_messages(data: dict):
+    global _msg_cache
+    _msg_cache = data          # update cache immediately so next read is instant
     save_json("messages", MESSAGES_FILE, data)
 
 
@@ -330,7 +345,25 @@ def record_lookup(user_id: int, uid: str, username: str | None,
 # BGMI LOOKUP CORE
 # ─────────────────────────────────────────────────────────────
 
-def _get_token(session) -> str | None:
+# ─────────────────────────────────────────────────────────────
+# ROOTER TOKEN CACHE
+# The rooter.gg JWT is valid for ~45 days.  We cache it in
+# memory so only the very first lookup of a bot session pays
+# the homepage-fetch cost (~300-600 ms).  Subsequent lookups
+# go straight to the bazaar.rooter.io API.
+# ─────────────────────────────────────────────────────────────
+
+_token_cache: dict = {"token": None, "session": None, "expires_at": 0.0}
+_TOKEN_TTL = 1800   # refresh after 30 minutes (well within the 45-day JWT lifetime)
+
+
+def _get_cached_token():
+    """Return (session, token), refreshing from rooter.gg only when stale."""
+    now = time.monotonic()
+    if _token_cache["token"] and now < _token_cache["expires_at"]:
+        return _token_cache["session"], _token_cache["token"]
+
+    session = requests.Session()
     try:
         session.get(
             "https://www.rooter.gg/",
@@ -344,15 +377,22 @@ def _get_token(session) -> str | None:
         )
         raw = session.cookies.get("user_auth")
         if not raw:
-            return None
-        return json.loads(unquote(raw)).get("accessToken")
+            return session, None
+        token = json.loads(unquote(raw)).get("accessToken")
     except Exception:
-        return None
+        return session, None
+
+    if token:
+        _token_cache["token"]      = token
+        _token_cache["session"]    = session
+        _token_cache["expires_at"] = now + _TOKEN_TTL
+        print("[TOKEN] Rooter token refreshed (cached for 30 min)", flush=True)
+
+    return session, token
 
 
 def get_bgmi_username(user_id: str):
-    session = requests.Session()
-    token = _get_token(session)
+    session, token = _get_cached_token()
     if not token:
         return None, "token_failed"
     try:
@@ -371,6 +411,9 @@ def get_bgmi_username(user_id: str):
         ).json()
         if data.get("transaction") == "SUCCESS":
             return data["unipinRes"]["username"], "success"
+        # If the token was rejected (expired), clear cache so next call refreshes
+        if data.get("statusCode") in (401, 403):
+            _token_cache["token"] = None
         return None, data.get("message", "Unknown error")
     except Exception as e:
         return None, str(e)
@@ -824,7 +867,8 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_to_message_id=update.message.message_id,
     )
-    username, api_status = get_bgmi_username(text)
+    loop = asyncio.get_event_loop()
+    username, api_status = await loop.run_in_executor(_executor, get_bgmi_username, text)
     await wait.delete()
 
     if api_status == "success":
