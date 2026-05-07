@@ -48,6 +48,12 @@ STYLE_LABEL   = {
 }
 
 # ─────────────────────────────────────────────────────────────
+# BROADCAST — wizard step constants
+# ─────────────────────────────────────────────────────────────
+BC_CAPTURE = "bc_capture"   # waiting for the message to broadcast
+BC_BUTTONS = "bc_buttons"   # waiting for button definitions (or skip)
+
+# ─────────────────────────────────────────────────────────────
 # MESSAGE TEMPLATES  (owner-editable via /botsettings)
 # Variables:
 #   start          → {mention}  {first_name}
@@ -519,7 +525,10 @@ def _bs_clear(ud: dict):
 
 
 # Wizard keys that must survive across webhook requests on Vercel
-_WIZARD_KEYS = frozenset({"bs_step", "bs_key", "bs_current_btn", "bs_prompt_msg_id"})
+_WIZARD_KEYS = frozenset({
+    "bs_step", "bs_key", "bs_current_btn", "bs_prompt_msg_id",
+    "bc_step", "bc_src_chat", "bc_src_msg", "bc_buttons",
+})
 
 
 def with_persistent_ud(func):
@@ -700,6 +709,356 @@ def _style_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔴 Danger",  callback_data="s_bs_danger"),
         ],
     ])
+
+
+# ─────────────────────────────────────────────────────────────
+# BROADCAST — helpers
+# ─────────────────────────────────────────────────────────────
+
+def _bc_clear(ud: dict):
+    for k in ("bc_step", "bc_src_chat", "bc_src_msg", "bc_buttons"):
+        ud.pop(k, None)
+
+
+def _all_user_ids() -> list[int]:
+    """Return every user ID that has ever interacted with the bot."""
+    return [int(k) for k in load_stats().get("user_activity", {}).keys()]
+
+
+def _parse_bc_buttons(raw: str) -> list[list[dict]]:
+    """Parse button definition text into a 2-D list (rows × cols).
+
+    One row per line.  Two buttons on the same row: separate with ||
+    Syntax:  Text | URL [| style]  [|| Text2 | URL2 [| style2]]
+    style is optional: primary / success / danger
+    """
+    rows = []
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        row = []
+        for cell in line.split("||"):
+            parts = [p.strip() for p in cell.split("|")]
+            if len(parts) < 2:
+                continue
+            text  = parts[0].strip()
+            url   = parts[1].strip()
+            style = parts[2].strip().lower() if len(parts) >= 3 else ""
+            if not text or not re.match(r"^(https?://|tg://)", url):
+                continue
+            btn = {"text": text, "url": url}
+            if style in ("primary", "success", "danger"):
+                btn["style"] = style
+            row.append(btn)
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _bc_build_markup(buttons_2d: list[list[dict]]) -> InlineKeyboardMarkup | None:
+    if not buttons_2d:
+        return None
+    rows = []
+    for row in buttons_2d:
+        kb_row = []
+        for btn in row:
+            api_kwargs = {}
+            style = btn.get("style", "").strip()
+            if style in ("primary", "success", "danger"):
+                api_kwargs["style"] = style
+            kb_row.append(InlineKeyboardButton(
+                text=btn["text"], url=btn["url"],
+                api_kwargs=api_kwargs if api_kwargs else None,
+            ))
+        rows.append(kb_row)
+    return InlineKeyboardMarkup(rows)
+
+
+def _bc_buttons_preview_text(buttons_2d: list[list[dict]]) -> str:
+    if not buttons_2d:
+        return "  <i>None</i>"
+    lines = []
+    for row in buttons_2d:
+        cells = []
+        for b in row:
+            style = b.get("style") or "default"
+            cells.append(f"[<b>{escape(b['text'])}</b> → <code>{escape(b['url'])}</code> | {style}]")
+        lines.append("  " + "  +  ".join(cells))
+    return "\n".join(lines)
+
+
+def _bc_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("❌ Cancel Broadcast", callback_data="bc_cancel"),
+    ]])
+
+
+def _bc_buttons_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏭️ Skip — No Buttons", callback_data="bc_skip_btn")],
+        [InlineKeyboardButton("❌ Cancel Broadcast",   callback_data="bc_cancel")],
+    ])
+
+
+def _bc_confirm_keyboard(user_count: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"📣 Send to {user_count} users",
+            callback_data="bc_confirm",
+            api_kwargs={"style": "success"},
+        )],
+        [InlineKeyboardButton("✏️ Change Buttons", callback_data="bc_redo_btn")],
+        [InlineKeyboardButton("❌ Cancel",          callback_data="bc_cancel")],
+    ])
+
+
+# ─────────────────────────────────────────────────────────────
+# BROADCAST — command + wizard steps
+# ─────────────────────────────────────────────────────────────
+
+async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
+        await update.message.reply_text("⛔ <b>Owner only.</b>", parse_mode="HTML")
+        return
+    _bc_clear(context.user_data)
+    _bs_clear(context.user_data)
+    context.user_data["bc_step"] = BC_CAPTURE
+    await update.message.reply_text(
+        "📣 <b>Broadcast — Step 1 of 3</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Send or forward the <b>message you want to broadcast</b>.\n\n"
+        "✅ <b>Supported content:</b>\n"
+        "  • Text with <b>bold</b>, <i>italic</i>, <u>underline</u>, <tg-spoiler>spoiler</tg-spoiler>\n"
+        "  • Custom emoji, inline code, blockquote, links\n"
+        "  • Photos, videos, documents, GIFs, stickers\n"
+        "  • Forwarded messages (all formatting preserved)\n\n"
+        "<i>Send /cancel to abort at any time.</i>",
+        parse_mode="HTML",
+        reply_markup=_bc_cancel_keyboard(),
+    )
+
+
+async def _bc_capture(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Called when owner sends a message during BC_CAPTURE step."""
+    ud  = context.user_data
+    msg = update.message
+    ud["bc_src_chat"] = msg.chat_id
+    ud["bc_src_msg"]  = msg.message_id
+    ud["bc_step"]     = BC_BUTTONS
+    user_count = len(_all_user_ids())
+    await msg.reply_text(
+        "📣 <b>Broadcast — Step 2 of 3</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "✅ <b>Message captured!</b>\n\n"
+        "Now add <b>inline buttons</b> (optional).\n\n"
+        "📋 <b>Format — one row per line:</b>\n"
+        "<code>Button Label | https://url.com</code>\n"
+        "<code>Button Label | https://url.com | primary</code>\n\n"
+        "💡 <b>Two buttons on the same row:</b>\n"
+        "<code>Btn A | url_a || Btn B | url_b</code>\n\n"
+        "🎨 <b>Styles:</b>  <code>primary</code> 🔵  "
+        "<code>success</code> 🟢  <code>danger</code> 🔴\n\n"
+        f"👥 Will be delivered to <b>{user_count} users</b>.\n\n"
+        "<i>Send /cancel to abort.</i>",
+        parse_mode="HTML",
+        reply_markup=_bc_buttons_keyboard(),
+    )
+
+
+async def _bc_receive_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Called when owner sends button definitions during BC_BUTTONS step."""
+    ud         = context.user_data
+    raw        = update.message.text or ""
+    buttons_2d = _parse_bc_buttons(raw)
+    if not buttons_2d:
+        await update.message.reply_text(
+            "⚠️ <b>No valid buttons found.</b>\n\n"
+            "Use the format:\n"
+            "<code>Button Label | https://url.com</code>\n\n"
+            "Or tap <b>Skip — No Buttons</b> to continue without buttons.",
+            parse_mode="HTML",
+            reply_markup=_bc_buttons_keyboard(),
+        )
+        return
+    ud["bc_buttons"] = buttons_2d
+    ud["bc_step"]    = BC_CAPTURE   # guard — confirm handled via callback
+    await _bc_show_confirm(update.message.chat_id, context)
+
+
+async def _bc_show_confirm(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Send the confirmation screen with full preview."""
+    ud         = context.user_data
+    src_chat   = ud.get("bc_src_chat")
+    src_msg    = ud.get("bc_src_msg")
+    buttons_2d = ud.get("bc_buttons") or []
+    user_count = len(_all_user_ids())
+    markup     = _bc_build_markup(buttons_2d)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "📣 <b>Broadcast — Step 3 of 3 — Confirm</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🔘 <b>Inline Buttons:</b>\n{_bc_buttons_preview_text(buttons_2d)}\n\n"
+            f"👥 <b>Recipients:</b>  <b>{user_count} users</b>\n\n"
+            "👁️ <b>Message preview below ↓</b>\n\n"
+            "⚡ Confirm to send — <b>this cannot be undone.</b>"
+        ),
+        parse_mode="HTML",
+        reply_markup=_bc_confirm_keyboard(user_count),
+    )
+    try:
+        await context.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=src_chat,
+            message_id=src_msg,
+            reply_markup=markup,
+        )
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"⚠️ <b>Preview error:</b>\n<code>{escape(str(e)[:300])}</code>",
+            parse_mode="HTML",
+        )
+
+
+# ─────────────────────────────────────────────────────────────
+# BROADCAST — callback handler
+# ─────────────────────────────────────────────────────────────
+
+async def bc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q  = update.callback_query
+    ud = context.user_data
+    await q.answer()
+
+    if not (OWNER_ID and q.from_user.id == OWNER_ID):
+        await q.answer("⛔ Owner only.", show_alert=True)
+        return
+
+    data = q.data or ""
+
+    # ── Cancel ──────────────────────────────────────────────
+    if data == "bc_cancel":
+        _bc_clear(ud)
+        try:
+            await q.message.edit_text("❌ <b>Broadcast cancelled.</b>", parse_mode="HTML")
+        except Exception:
+            pass
+        return
+
+    # ── Skip buttons ─────────────────────────────────────────
+    if data == "bc_skip_btn":
+        ud["bc_buttons"] = []
+        await _bc_show_confirm(q.message.chat_id, context)
+        return
+
+    # ── Redo buttons ─────────────────────────────────────────
+    if data == "bc_redo_btn":
+        ud["bc_step"] = BC_BUTTONS
+        try:
+            await q.message.edit_text(
+                "📣 <b>Broadcast — Update Buttons</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Send your new button definitions.\n\n"
+                "📋 <b>Format — one row per line:</b>\n"
+                "<code>Button Label | https://url.com</code>\n"
+                "<code>Button Label | https://url.com | primary</code>\n\n"
+                "💡 <b>Two buttons on the same row:</b>\n"
+                "<code>Btn A | url_a || Btn B | url_b</code>\n\n"
+                "🎨 <b>Styles:</b>  <code>primary</code> 🔵  "
+                "<code>success</code> 🟢  <code>danger</code> 🔴",
+                parse_mode="HTML",
+                reply_markup=_bc_buttons_keyboard(),
+            )
+        except Exception:
+            pass
+        return
+
+    # ── Confirm — start broadcast ─────────────────────────────
+    if data == "bc_confirm":
+        src_chat   = ud.get("bc_src_chat")
+        src_msg    = ud.get("bc_src_msg")
+        buttons_2d = ud.get("bc_buttons") or []
+
+        if not src_chat or not src_msg:
+            await q.answer("⚠️ Session expired. Please run /broadcast again.", show_alert=True)
+            return
+
+        markup   = _bc_build_markup(buttons_2d)
+        user_ids = _all_user_ids()
+        total    = len(user_ids)
+
+        _bc_clear(ud)
+
+        try:
+            await q.message.edit_text(
+                "📣 <b>Broadcasting…</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"⏳ Preparing to send to <b>{total}</b> users…",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+        sent = blocked = failed = 0
+        status_msg = q.message
+
+        for i, uid in enumerate(user_ids, 1):
+            try:
+                await context.bot.copy_message(
+                    chat_id=uid,
+                    from_chat_id=src_chat,
+                    message_id=src_msg,
+                    reply_markup=markup,
+                )
+                sent += 1
+            except Exception as e:
+                err = str(e).lower()
+                if any(x in err for x in ("blocked", "forbidden", "deactivated", "kicked", "not found")):
+                    blocked += 1
+                else:
+                    failed += 1
+
+            if i % 20 == 0 or i == total:
+                pct = int(i / total * 100)
+                bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                try:
+                    await status_msg.edit_text(
+                        "📣 <b>Broadcasting…</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"<code>[{bar}]  {pct}%</code>\n\n"
+                        f"✅  Sent      <b>{sent}</b>\n"
+                        f"🚫  Blocked   <b>{blocked}</b>\n"
+                        f"❌  Failed    <b>{failed}</b>\n"
+                        f"📊  Progress  <b>{i} / {total}</b>",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+
+            await asyncio.sleep(0.05)   # ~20 msgs/sec — stays within Telegram limits
+
+        success_rate = f"{sent / total * 100:.1f}%" if total else "—"
+        print(
+            f"[BROADCAST] done  sent={sent}  blocked={blocked}  "
+            f"failed={failed}  total={total}",
+            flush=True,
+        )
+        try:
+            await status_msg.edit_text(
+                "📣 <b>Broadcast Complete!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"✅  <b>Sent</b>          <b>{sent}</b>\n"
+                f"🚫  <b>Blocked</b>       <b>{blocked}</b>\n"
+                f"❌  <b>Failed</b>        <b>{failed}</b>\n"
+                f"👥  <b>Total users</b>   <b>{total}</b>\n"
+                f"📈  <b>Success rate</b>  <b>{success_rate}</b>\n\n"
+                "✔️ <i>Broadcast finished.</i>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────
@@ -895,12 +1254,34 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @with_persistent_ud
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Routes to settings wizard or UID lookup."""
-    print(f"[MSG] uid={update.effective_user.id}  text={update.message.text!r}", flush=True)
+    """Routes to broadcast wizard, settings wizard, or UID lookup."""
+    if not update.message:
+        return
+    msg_text = update.message.text or ""
+    print(f"[MSG] uid={update.effective_user.id}  text={msg_text!r}", flush=True)
     ud      = context.user_data
+    bc_step = ud.get("bc_step", "")
     bs_step = ud.get("bs_step", BS_IDLE)
 
     if is_owner(update):
+        # ── Broadcast wizard ──────────────────────────────────────
+        if bc_step == BC_CAPTURE:
+            await _bc_capture(update, context)
+            return
+        if bc_step == BC_BUTTONS:
+            # Button step only accepts text; media goes back to capture
+            if not msg_text.strip():
+                await update.message.reply_text(
+                    "⚠️ Please send the <b>button definitions as text</b>, "
+                    "or tap <b>Skip — No Buttons</b>.",
+                    parse_mode="HTML",
+                    reply_markup=_bc_buttons_keyboard(),
+                )
+                return
+            await _bc_receive_buttons(update, context)
+            return
+
+        # ── Bot-settings wizard ───────────────────────────────────
         if bs_step == BS_EDIT_TEXT:
             await _bs_save_text(update, context)
             return
@@ -914,7 +1295,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _bs_save_btn_emoji(update, context)
             return
 
-    await _lookup_uid(update, context)
+    # ── UID lookup — text only ────────────────────────────────────
+    if msg_text.strip():
+        await _lookup_uid(update, context)
 
 
 async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1010,9 +1393,20 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update):
         return
     ud      = context.user_data
+    bc_step = ud.get("bc_step", "")
     bs_step = ud.get("bs_step", BS_IDLE)
     bs_key  = ud.get("bs_key")
 
+    # ── Cancel broadcast wizard ───────────────────────────────────
+    if bc_step in (BC_CAPTURE, BC_BUTTONS):
+        _bc_clear(ud)
+        await update.message.reply_text(
+            "❌ <b>Broadcast cancelled.</b>",
+            parse_mode="HTML",
+        )
+        return
+
+    # ── Cancel botsettings sub-step ───────────────────────────────
     if bs_step in (BS_BTN_TEXT, BS_BTN_URL, BS_BTN_EMOJI):
         ud["bs_step"] = BS_IDLE
         ud.pop("bs_current_btn", None)
@@ -1614,9 +2008,14 @@ def _add_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("history",     cmd_history))
     app.add_handler(CommandHandler("stats",       cmd_stats))
     app.add_handler(CommandHandler("botsettings", cmd_botsettings))
+    app.add_handler(CommandHandler("broadcast",   cmd_broadcast))
     app.add_handler(CommandHandler("cancel",      cmd_cancel))
+    app.add_handler(CallbackQueryHandler(bc_callback,       pattern=r"^bc_"))
     app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^s_"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Broadcast capture also needs to handle non-text messages (photos, videos, etc.)
+    app.add_handler(MessageHandler(
+        filters.ALL & ~filters.COMMAND, handle_message
+    ))
     app.add_error_handler(_error_handler)
 
 
