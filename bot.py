@@ -6,12 +6,14 @@ import json
 import requests
 from html import escape
 from urllib.parse import unquote
+from functools import wraps
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, LinkPreviewOptions
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes,
 )
+from storage import load_json, save_json, load_ud, save_ud, del_ud, IS_VERCEL
 
 TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
@@ -141,19 +143,11 @@ SAMPLE = {
 # ─────────────────────────────────────────────────────────────
 
 def load_messages() -> dict:
-    if os.path.exists(MESSAGES_FILE):
-        try:
-            with open(MESSAGES_FILE, "r", encoding="utf-8") as f:
-                stored = json.load(f)
-            return {**DEFAULT_MESSAGES, **stored}
-        except Exception:
-            pass
-    return dict(DEFAULT_MESSAGES)
+    return load_json("messages", MESSAGES_FILE, DEFAULT_MESSAGES)
 
 
 def save_messages(data: dict):
-    with open(MESSAGES_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    save_json("messages", MESSAGES_FILE, data)
 
 
 def get_msg(key: str, **kwargs) -> str:
@@ -237,18 +231,11 @@ def _buttons_summary(buttons: list[dict]) -> str:
 # ─────────────────────────────────────────────────────────────
 
 def load_history() -> dict:
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    return load_json("history", HISTORY_FILE, {})
 
 
 def save_history(data: dict):
-    with open(HISTORY_FILE, "w") as f:
-        json.dump(data, f)
+    save_json("history", HISTORY_FILE, data)
 
 
 def add_to_history(user_id, uid, username):
@@ -291,21 +278,14 @@ def _empty_stats() -> dict:
 
 
 def load_stats() -> dict:
-    if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, "r") as f:
-                stored = json.load(f)
-            base = _empty_stats()
-            base.update(stored)
-            return base
-        except Exception:
-            pass
-    return _empty_stats()
+    stored = load_json("stats", STATS_FILE, {})
+    base   = _empty_stats()
+    base.update(stored)
+    return base
 
 
 def save_stats(data: dict):
-    with open(STATS_FILE, "w") as f:
-        json.dump(data, f)
+    save_json("stats", STATS_FILE, data)
 
 
 def record_lookup(user_id: int, uid: str, username: str | None,
@@ -423,6 +403,41 @@ def _bs_clear(ud: dict):
     """Clear all botsettings wizard state from user_data."""
     for k in ("bs_step", "bs_key", "bs_current_btn", "bs_prompt_msg_id"):
         ud.pop(k, None)
+
+
+# Wizard keys that must survive across webhook requests on Vercel
+_WIZARD_KEYS = frozenset({"bs_step", "bs_key", "bs_current_btn", "bs_prompt_msg_id"})
+
+
+def with_persistent_ud(func):
+    """Decorator that syncs wizard state between Redis and context.user_data.
+
+    On Vercel (serverless) each request is a new function invocation, so
+    context.user_data starts empty.  This decorator:
+      1. Loads wizard state from Redis into context.user_data at handler start.
+      2. Saves updated wizard state back to Redis in a finally block.
+
+    On Replit (polling) context.user_data is always in-memory and persistent,
+    so IS_VERCEL is False and this decorator is a transparent no-op.
+    """
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if user and IS_VERCEL:
+            persisted = load_ud(user.id)
+            if persisted:
+                context.user_data.update(persisted)
+        try:
+            await func(update, context)
+        finally:
+            if user and IS_VERCEL:
+                wizard = {k: context.user_data[k]
+                          for k in _WIZARD_KEYS if k in context.user_data}
+                if wizard:
+                    save_ud(user.id, wizard)
+                else:
+                    del_ud(user.id)
+    return wrapper
 
 
 # ─────────────────────────────────────────────────────────────
@@ -763,6 +778,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 
+@with_persistent_ud
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Routes to settings wizard or UID lookup."""
     ud      = context.user_data
@@ -842,6 +858,7 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # HANDLERS — OWNER /botsettings
 # ─────────────────────────────────────────────────────────────
 
+@with_persistent_ud
 async def cmd_botsettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update):
         await update.message.reply_text("⛔ <b>Owner only.</b>", parse_mode="HTML")
@@ -858,6 +875,7 @@ async def cmd_botsettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@with_persistent_ud
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update):
         return
@@ -890,6 +908,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@with_persistent_ud
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q  = update.callback_query
     ud = context.user_data
@@ -1442,7 +1461,32 @@ async def _bs_send_preview(chat_id: int, key: str, context: ContextTypes.DEFAULT
 
 
 # ─────────────────────────────────────────────────────────────
-# MAIN
+# APPLICATION FACTORY  (shared by polling + webhook)
+# ─────────────────────────────────────────────────────────────
+
+def _add_handlers(app: Application) -> None:
+    """Register all handlers. Called by both build_app() and main()."""
+    app.add_handler(CommandHandler("start",       cmd_start))
+    app.add_handler(CommandHandler("history",     cmd_history))
+    app.add_handler(CommandHandler("stats",       cmd_stats))
+    app.add_handler(CommandHandler("botsettings", cmd_botsettings))
+    app.add_handler(CommandHandler("cancel",      cmd_cancel))
+    app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^s_"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+
+def build_app() -> Application:
+    """Build the Application in webhook mode (no Updater).
+    Imported and called by api/webhook.py on Vercel."""
+    if not TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set.")
+    app = Application.builder().token(TOKEN).updater(None).build()
+    _add_handlers(app)
+    return app
+
+
+# ─────────────────────────────────────────────────────────────
+# MAIN  (polling mode — used on Replit)
 # ─────────────────────────────────────────────────────────────
 
 def main():
@@ -1453,16 +1497,9 @@ def main():
         print("[WARN]  OWNER_ID not set — /botsettings will be disabled.")
 
     app = Application.builder().token(TOKEN).build()
+    _add_handlers(app)
 
-    app.add_handler(CommandHandler("start",       cmd_start))
-    app.add_handler(CommandHandler("history",     cmd_history))
-    app.add_handler(CommandHandler("stats",       cmd_stats))
-    app.add_handler(CommandHandler("botsettings", cmd_botsettings))
-    app.add_handler(CommandHandler("cancel",      cmd_cancel))
-    app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^s_"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    print("[✓] BGMI ID INFO Bot is running...")
+    print("[✓] BGMI ID INFO Bot is running (polling)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
