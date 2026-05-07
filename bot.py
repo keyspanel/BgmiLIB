@@ -595,6 +595,7 @@ def _style_keyboard() -> InlineKeyboardMarkup:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user        = update.effective_user
+    print(f"[CMD] /start  uid={user.id}  name={user.first_name}", flush=True)
     mention     = f'<a href="tg://user?id={user.id}">{escape(user.first_name)}</a>'
     text        = get_msg("start", mention=mention, first_name=escape(user.first_name))
     preview_url = load_messages().get("start_preview_url", "").strip()
@@ -623,6 +624,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"[CMD] /history  uid={update.effective_user.id}", flush=True)
     entries = get_history(update.effective_user.id)
     if not entries:
         await update.message.reply_text(
@@ -781,6 +783,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @with_persistent_ud
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Routes to settings wizard or UID lookup."""
+    print(f"[MSG] uid={update.effective_user.id}  text={update.message.text!r}", flush=True)
     ud      = context.user_data
     bs_step = ud.get("bs_step", BS_IDLE)
 
@@ -825,6 +828,7 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await wait.delete()
 
     if api_status == "success":
+        print(f"[LOOKUP] FOUND  uid={user_id}  bgmi_uid={text}  username={username}", flush=True)
         add_to_history(user_id, text, username)
         record_lookup(user_id, text, username, fn, "found")
         await update.message.reply_text(
@@ -837,6 +841,7 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=build_inline_keyboard("found"),
         )
     elif api_status == "token_failed":
+        print(f"[LOOKUP] CONN_FAILED  uid={user_id}  bgmi_uid={text}", flush=True)
         record_lookup(user_id, text, None, fn, "conn_failed")
         await update.message.reply_text(
             get_msg("conn_failed"),
@@ -845,6 +850,7 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=build_inline_keyboard("conn_failed"),
         )
     else:
+        print(f"[LOOKUP] NOT_FOUND  uid={user_id}  bgmi_uid={text}", flush=True)
         record_lookup(user_id, text, None, fn, "not_found")
         await update.message.reply_text(
             get_msg("not_found", uid=escape(text)),
@@ -1491,15 +1497,20 @@ def build_app() -> Application:
 
 def main():
     if not TOKEN:
-        print("[ERROR] TELEGRAM_BOT_TOKEN is not set.")
+        print("[ERROR] TELEGRAM_BOT_TOKEN is not set.", flush=True)
         return
     if not OWNER_ID:
-        print("[WARN]  OWNER_ID not set — /botsettings will be disabled.")
+        print("[WARN]  OWNER_ID not set — /botsettings will be disabled.", flush=True)
 
     app = Application.builder().token(TOKEN).build()
     _add_handlers(app)
 
-    print("[✓] BGMI ID INFO Bot is running (polling)...")
+    from datetime import datetime, timezone as tz
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", flush=True)
+    print(f"[✓] BGMI ID INFO Bot is running (polling)", flush=True)
+    print(f"[✓] Started at {datetime.now(tz.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC", flush=True)
+    print(f"[✓] Owner ID : {OWNER_ID}", flush=True)
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", flush=True)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
