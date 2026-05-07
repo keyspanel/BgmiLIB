@@ -423,12 +423,24 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _capture_html(msg) -> str:
+    """Capture owner's message preserving all Telegram formatting (bold, italic, custom emoji, etc.)."""
+    try:
+        html = getattr(msg, "text_html", None) or getattr(msg, "caption_html", None)
+        if html is not None:
+            return html.strip()
+    except Exception:
+        pass
+    return (msg.text or msg.caption or "").strip()
+
+
 async def _save_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     key      = context.user_data.pop("editing_key", None)
-    new_text = update.message.text
 
     if not key:
         return
+
+    new_text = _capture_html(update.message)
 
     msgs = load_messages()
     msgs[key] = new_text
