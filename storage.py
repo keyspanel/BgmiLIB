@@ -26,7 +26,7 @@ _WIZARD_TTL = 3_600   # 1 hour — stale wizard sessions auto-expire
 def _get_conn():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not set.")
-    return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+    return psycopg2.connect(DATABASE_URL, connect_timeout=5)
 
 
 def _ensure_tables() -> None:
