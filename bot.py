@@ -6,6 +6,7 @@ import json
 import requests
 from html import escape
 from urllib.parse import unquote
+from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, LinkPreviewOptions
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -15,9 +16,11 @@ from telegram.ext import (
 TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
-HISTORY_FILE  = "history.json"
-MESSAGES_FILE = "messages.json"
-MAX_HISTORY   = 10
+HISTORY_FILE   = "history.json"
+MESSAGES_FILE  = "messages.json"
+STATS_FILE     = "stats.json"
+MAX_HISTORY    = 10
+BOT_START_TIME = datetime.now(timezone.utc)
 
 # ─────────────────────────────────────────────────────────────
 # BOTSETTINGS — wizard step constants
@@ -260,6 +263,87 @@ def add_to_history(user_id, uid, username):
 
 def get_history(user_id) -> list:
     return load_history().get(str(user_id), [])
+
+
+# ─────────────────────────────────────────────────────────────
+# STATS STORE
+# stats.json schema:
+#   total_lookups, total_found, total_not_found, total_conn_failed
+#   daily:        { "YYYY-MM-DD": { lookups, found, not_found, conn_failed } }
+#   uid_counts:   { "uid": { count, last_username } }
+#   user_activity:{ "user_id": { count, first_name, first_seen, last_seen } }
+# ─────────────────────────────────────────────────────────────
+
+def _today_str() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _empty_stats() -> dict:
+    return {
+        "total_lookups":    0,
+        "total_found":      0,
+        "total_not_found":  0,
+        "total_conn_failed": 0,
+        "daily":            {},
+        "uid_counts":       {},
+        "user_activity":    {},
+    }
+
+
+def load_stats() -> dict:
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, "r") as f:
+                stored = json.load(f)
+            base = _empty_stats()
+            base.update(stored)
+            return base
+        except Exception:
+            pass
+    return _empty_stats()
+
+
+def save_stats(data: dict):
+    with open(STATS_FILE, "w") as f:
+        json.dump(data, f)
+
+
+def record_lookup(user_id: int, uid: str, username: str | None,
+                  first_name: str, status: str):
+    """Record one lookup event. status: 'found' | 'not_found' | 'conn_failed'"""
+    s     = load_stats()
+    today = _today_str()
+
+    s["total_lookups"]        = s.get("total_lookups", 0) + 1
+    stat_key                  = f"total_{status}"
+    s[stat_key]               = s.get(stat_key, 0) + 1
+
+    # Daily bucket
+    day = s.setdefault("daily", {}).setdefault(today, {
+        "lookups": 0, "found": 0, "not_found": 0, "conn_failed": 0
+    })
+    day["lookups"] = day.get("lookups", 0) + 1
+    day[status]    = day.get(status, 0) + 1
+
+    # UID frequency (found lookups only)
+    if status == "found" and username:
+        uc    = s.setdefault("uid_counts", {})
+        entry = uc.setdefault(uid, {"count": 0, "last_username": ""})
+        entry["count"]        += 1
+        entry["last_username"] = username
+
+    # Per-user activity
+    ua        = s.setdefault("user_activity", {})
+    ukey      = str(user_id)
+    ua_entry  = ua.setdefault(ukey, {
+        "count": 0, "first_name": first_name,
+        "first_seen": today, "last_seen": today,
+    })
+    ua_entry["count"]      += 1
+    ua_entry["last_seen"]   = today
+    ua_entry["first_name"]  = first_name   # keep name current
+
+    save_stats(s)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -555,6 +639,130 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update):
+        await update.message.reply_text("⛔ <b>Owner only.</b>", parse_mode="HTML")
+        return
+
+    s     = load_stats()
+    today = _today_str()
+    now   = datetime.now(timezone.utc)
+
+    # ── Uptime ──────────────────────────────────────────────────
+    delta   = now - BOT_START_TIME
+    udays   = delta.days
+    uhours  = delta.seconds // 3600
+    umins   = (delta.seconds % 3600) // 60
+    uparts  = []
+    if udays:   uparts.append(f"{udays}d")
+    if uhours:  uparts.append(f"{uhours}h")
+    uparts.append(f"{umins}m")
+    uptime  = " ".join(uparts) or "< 1m"
+
+    # ── Headline counters ───────────────────────────────────────
+    total_lookups = s.get("total_lookups", 0)
+    total_found   = s.get("total_found", 0)
+    total_nf      = s.get("total_not_found", 0)
+    total_cf      = s.get("total_conn_failed", 0)
+    total_users   = len(s.get("user_activity", {}))
+    rate          = f"{total_found / total_lookups * 100:.1f}%" if total_lookups else "—"
+
+    # ── Time-window counters ────────────────────────────────────
+    daily         = s.get("daily", {})
+    today_data    = daily.get(today, {})
+    today_count   = today_data.get("lookups", 0)
+    today_found   = today_data.get("found", 0)
+    yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday     = daily.get(yesterday_str, {}).get("lookups", 0)
+    today_dt      = now.date()
+    week_start    = today_dt - timedelta(days=today_dt.weekday())
+    week_count    = sum(
+        daily.get((week_start + timedelta(days=i)).strftime("%Y-%m-%d"), {}).get("lookups", 0)
+        for i in range(7)
+    )
+    month_prefix  = now.strftime("%Y-%m")
+    month_count   = sum(
+        v.get("lookups", 0) for k, v in daily.items() if k.startswith(month_prefix)
+    )
+
+    # ── 7-day bar chart ─────────────────────────────────────────
+    BARS      = " ▁▂▃▄▅▆▇█"
+    day_vals  = [
+        daily.get((today_dt - timedelta(days=6 - i)).strftime("%Y-%m-%d"), {}).get("lookups", 0)
+        for i in range(7)
+    ]
+    max_val   = max(day_vals) or 1
+    chart_lines = []
+    for i, cnt in enumerate(day_vals):
+        day_dt  = today_dt - timedelta(days=6 - i)
+        bar_idx = round(cnt / max_val * 8)
+        bar_idx = max(1, bar_idx) if cnt > 0 else 0
+        bar     = BARS[bar_idx] * 10
+        label   = day_dt.strftime("%d %b")
+        marker  = "  ← today" if day_dt == today_dt else ""
+        chart_lines.append(f"  <code>{label}</code>  {bar}  <b>{cnt}</b>{marker}")
+
+    # ── Top 5 UIDs ──────────────────────────────────────────────
+    MEDALS   = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    uid_rows = sorted(
+        s.get("uid_counts", {}).items(),
+        key=lambda x: x[1].get("count", 0), reverse=True
+    )[:5]
+    uid_lines = [
+        f"  {MEDALS[i]}  <code>{escape(d.get('last_username','?'))}</code>"
+        f"  <code>{escape(uid)}</code>  <b>{d.get('count',0)}×</b>"
+        for i, (uid, d) in enumerate(uid_rows)
+    ] or ["  <i>No data yet.</i>"]
+
+    # ── Top 5 users ─────────────────────────────────────────────
+    user_rows = sorted(
+        s.get("user_activity", {}).items(),
+        key=lambda x: x[1].get("count", 0), reverse=True
+    )[:5]
+    user_lines = [
+        f"  {MEDALS[i]}  <b>{escape(d.get('first_name','?'))}</b>"
+        f"  —  {d.get('count',0)} lookups"
+        f"  <i>(since {d.get('first_seen','?')})</i>"
+        for i, (_, d) in enumerate(user_rows)
+    ] or ["  <i>No data yet.</i>"]
+
+    # ── Peak day ────────────────────────────────────────────────
+    if daily:
+        peak_date, peak_data = max(daily.items(), key=lambda x: x[1].get("lookups", 0))
+        peak_str = f"{peak_date}  ({peak_data.get('lookups', 0)} lookups)"
+    else:
+        peak_str = "—"
+
+    text = (
+        "📊 <b>Bot Statistics</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥  <b>Total Users</b>          {total_users}\n"
+        f"🔍  <b>All-Time Lookups</b>     {total_lookups}\n"
+        f"✅  <b>Found</b>               {total_found}  <i>({rate} success)</i>\n"
+        f"💀  <b>Not Found</b>           {total_nf}\n"
+        f"❌  <b>Conn. Failures</b>      {total_cf}\n"
+        f"⏱️  <b>Uptime</b>              {uptime}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📅  <b>Today</b>               {today_count}  <i>({today_found} found)</i>\n"
+        f"🗓️  <b>Yesterday</b>           {yesterday}\n"
+        f"📈  <b>This Week</b>           {week_count}\n"
+        f"🗃️  <b>This Month</b>          {month_count}\n"
+        f"🏔️  <b>Peak Day</b>            {peak_str}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📉 <b>Last 7 Days</b>\n"
+        + "\n".join(chart_lines) + "\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🏆 <b>Top 5 Most Searched UIDs</b>\n"
+        + "\n".join(uid_lines) + "\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "👤 <b>Top 5 Most Active Users</b>\n"
+        + "\n".join(user_lines) + "\n\n"
+        f"<i>🕐 {now.strftime('%Y-%m-%d %H:%M')} UTC</i>"
+    )
+
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Routes to settings wizard or UID lookup."""
     ud      = context.user_data
@@ -578,7 +786,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    text      = update.message.text.strip()
+    tg_user   = update.effective_user
+    user_id   = tg_user.id
+    fn        = (tg_user.first_name or "").strip() or "Unknown"
 
     if not is_valid_uid(text):
         await update.message.reply_text(
@@ -594,11 +805,12 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_to_message_id=update.message.message_id,
     )
-    username, status = get_bgmi_username(text)
+    username, api_status = get_bgmi_username(text)
     await wait.delete()
 
-    if status == "success":
-        add_to_history(update.effective_user.id, text, username)
+    if api_status == "success":
+        add_to_history(user_id, text, username)
+        record_lookup(user_id, text, username, fn, "found")
         await update.message.reply_text(
             get_msg("found",
                     username=escape(username),
@@ -608,7 +820,8 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_to_message_id=update.message.message_id,
             reply_markup=build_inline_keyboard("found"),
         )
-    elif status == "token_failed":
+    elif api_status == "token_failed":
+        record_lookup(user_id, text, None, fn, "conn_failed")
         await update.message.reply_text(
             get_msg("conn_failed"),
             parse_mode="HTML",
@@ -616,6 +829,7 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=build_inline_keyboard("conn_failed"),
         )
     else:
+        record_lookup(user_id, text, None, fn, "not_found")
         await update.message.reply_text(
             get_msg("not_found", uid=escape(text)),
             parse_mode="HTML",
@@ -1242,6 +1456,7 @@ def main():
 
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("history",     cmd_history))
+    app.add_handler(CommandHandler("stats",       cmd_stats))
     app.add_handler(CommandHandler("botsettings", cmd_botsettings))
     app.add_handler(CommandHandler("cancel",      cmd_cancel))
     app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^s_"))
