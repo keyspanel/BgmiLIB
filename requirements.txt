@@ -1,3 +1,5 @@
 python-telegram-bot==22.7
 requests==2.33.1
 psycopg2-binary==2.9.10
+requests
+telegram

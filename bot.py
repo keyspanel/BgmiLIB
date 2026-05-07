@@ -911,6 +911,7 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_to_message_id=update.message.message_id,
             reply_markup=build_found_keyboard(username),
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
     elif api_status == "token_failed":
         print(f"[LOOKUP] CONN_FAILED  uid={user_id}  bgmi_uid={text}", flush=True)
