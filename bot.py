@@ -229,16 +229,17 @@ def build_inline_keyboard(key: str) -> InlineKeyboardMarkup | None:
         url  = btn.get("url", "").strip()
         if not text or not url:
             continue
-        # Only pass api_kwargs Telegram actually understands.
-        # 'style' is a local UI label only — never send it to the API.
+        # style and icon_custom_emoji_id are Bot API 9.4 fields.
+        # PTB v22 doesn't expose them as named args so they go via api_kwargs.
         api_kwargs = {}
+        style = btn.get("style", "").strip()
+        if style in ("primary", "success", "danger"):
+            api_kwargs["style"] = style
         emoji_id = btn.get("icon_custom_emoji_id", "").strip()
         if emoji_id:
             api_kwargs["icon_custom_emoji_id"] = emoji_id
-        entities = _deserialize_entities(btn.get("btn_entities", ""))
         rows.append([InlineKeyboardButton(
             text=text, url=url,
-            entities=entities or None,
             api_kwargs=api_kwargs if api_kwargs else None,
         )])
     return InlineKeyboardMarkup(rows) if rows else None
@@ -258,16 +259,17 @@ def build_found_keyboard(username: str) -> InlineKeyboardMarkup:
         btn_url  = btn.get("url", "").strip()
         if not btn_text or not btn_url:
             continue
-        # Only pass api_kwargs Telegram actually understands.
-        # 'style' is a local UI label only — never send it to the API.
+        # style and icon_custom_emoji_id are Bot API 9.4 fields.
+        # PTB v22 doesn't expose them as named args so they go via api_kwargs.
         api_kwargs = {}
+        style = btn.get("style", "").strip()
+        if style in ("primary", "success", "danger"):
+            api_kwargs["style"] = style
         emoji_id = btn.get("icon_custom_emoji_id", "").strip()
         if emoji_id:
             api_kwargs["icon_custom_emoji_id"] = emoji_id
-        entities = _deserialize_entities(btn.get("btn_entities", ""))
         rows.append([InlineKeyboardButton(
             text=btn_text, url=btn_url,
-            entities=entities or None,
             api_kwargs=api_kwargs if api_kwargs else None,
         )])
     return InlineKeyboardMarkup(rows)
