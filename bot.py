@@ -1495,12 +1495,36 @@ def build_app() -> Application:
 # MAIN  (polling mode — used on Replit)
 # ─────────────────────────────────────────────────────────────
 
+def _check_webhook_active() -> str | None:
+    """Return the active webhook URL if one is set, else None."""
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{TOKEN}/getWebhookInfo",
+            timeout=8,
+        )
+        info = resp.json().get("result", {})
+        url  = info.get("url", "").strip()
+        return url if url else None
+    except Exception:
+        return None
+
+
 def main():
     if not TOKEN:
         print("[ERROR] TELEGRAM_BOT_TOKEN is not set.", flush=True)
         return
     if not OWNER_ID:
         print("[WARN]  OWNER_ID not set — /botsettings will be disabled.", flush=True)
+
+    # Detect webhook conflict before starting polling
+    webhook_url = _check_webhook_active()
+    if webhook_url:
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", flush=True)
+        print(f"[ℹ] Webhook is active → {webhook_url}", flush=True)
+        print("[ℹ] Polling mode is disabled while webhook is set.", flush=True)
+        print("[ℹ] To switch to polling: run  DELETE_WEBHOOK=1 python setup_webhook.py", flush=True)
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", flush=True)
+        return
 
     app = Application.builder().token(TOKEN).build()
     _add_handlers(app)
