@@ -11,7 +11,7 @@ from urllib.parse import unquote
 from functools import wraps
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, LinkPreviewOptions, CopyTextButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, LinkPreviewOptions, CopyTextButton, MessageEntity
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes,
@@ -111,6 +111,11 @@ DEFAULT_MESSAGES = {
         "⚔️ You haven't searched any UIDs.\n"
         "🎯 Send a BGMI UID to get started!"
     ),
+    "rate_limit": (
+        "⏳ <b>Slow down!</b>\n\n"
+        "You can only look up <b>5 UIDs per minute</b>.\n"
+        "Please wait a moment and try again."
+    ),
     "start_preview_url": "",
 }
 
@@ -125,6 +130,7 @@ MSG_META = {
     "history_header":    ("📜 History Header",   ["{count}", "{max}"]),
     "history_item":      ("⭐ History Item",     ["{num}", "{username}", "{uid}"]),
     "history_empty":     ("📭 History Empty",    []),
+    "rate_limit":        ("⏳ Rate Limit",        []),
     "start_preview_url": ("🖼️ Start Image URL",  []),
 }
 
@@ -201,6 +207,17 @@ def save_buttons(key: str, buttons: list[dict]):
     save_messages(msgs)
 
 
+def _deserialize_entities(raw: str) -> list[MessageEntity] | None:
+    """Deserialize JSON-stored entities back to MessageEntity objects."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return [MessageEntity.de_json(e, None) for e in data] or None
+    except Exception:
+        return None
+
+
 def build_inline_keyboard(key: str) -> InlineKeyboardMarkup | None:
     """Build InlineKeyboardMarkup from saved buttons for a message key."""
     buttons = load_buttons(key)
@@ -219,8 +236,10 @@ def build_inline_keyboard(key: str) -> InlineKeyboardMarkup | None:
         emoji_id = btn.get("icon_custom_emoji_id", "").strip()
         if emoji_id:
             api_kwargs["icon_custom_emoji_id"] = emoji_id
+        entities = _deserialize_entities(btn.get("btn_entities", ""))
         rows.append([InlineKeyboardButton(
             text=text, url=url,
+            entities=entities,
             api_kwargs=api_kwargs if api_kwargs else None,
         )])
     return InlineKeyboardMarkup(rows) if rows else None
@@ -247,8 +266,10 @@ def build_found_keyboard(username: str) -> InlineKeyboardMarkup:
             api_kwargs["style"] = style
         if emoji_id:
             api_kwargs["icon_custom_emoji_id"] = emoji_id
+        entities = _deserialize_entities(btn.get("btn_entities", ""))
         rows.append([InlineKeyboardButton(
             text=btn_text, url=btn_url,
+            entities=entities,
             api_kwargs=api_kwargs if api_kwargs else None,
         )])
     return InlineKeyboardMarkup(rows)
@@ -913,7 +934,7 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if _is_rate_limited(user_id):
         await update.message.reply_text(
-            "⏳ <b>Slow down!</b>\n\nYou can only look up <b>5 UIDs per minute</b>. Please wait a moment and try again.",
+            get_msg("rate_limit"),
             parse_mode="HTML",
             reply_to_message_id=update.message.message_id,
             link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -1403,7 +1424,19 @@ async def _bs_save_btn_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    ud.setdefault("bs_current_btn", {})["text"] = text
+    btn_data = ud.setdefault("bs_current_btn", {})
+    btn_data["text"] = text
+
+    # Capture and store message entities (bold, custom emoji, etc.) so they
+    # are preserved in the button label via InlineKeyboardButton(entities=...)
+    entities = update.message.entities
+    if entities:
+        btn_data["btn_entities"] = json.dumps(
+            [e.to_dict() for e in entities], ensure_ascii=False
+        )
+    else:
+        btn_data.pop("btn_entities", None)
+
     ud["bs_step"] = BS_BTN_URL
 
     label = MSG_META.get(key, ("Message", []))[0]
