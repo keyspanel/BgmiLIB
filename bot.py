@@ -4,6 +4,7 @@ import os
 import re
 import json
 import requests
+from html import escape
 from urllib.parse import unquote
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -68,8 +69,7 @@ def get_bgmi_username(user_id):
 # =====================================
 
 def is_valid_uid(text):
-    text = text.strip()
-    return bool(re.fullmatch(r'\d{9,12}', text))
+    return bool(re.fullmatch(r'\d{9,12}', text.strip()))
 
 
 # =====================================
@@ -78,15 +78,15 @@ def is_valid_uid(text):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "👾 *BGMI ID INFO BOT*\n"
+        "👾 <b>BGMI ID INFO BOT</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Send me any *BGMI UID* and I'll instantly fetch the *in-game username* linked to it\\.\n\n"
-        "📌 *How to find your UID:*\n"
-        "Open BGMI → Tap your profile avatar \\(top\\-left\\) → Your UID is below your username\\.\n\n"
+        "Send me any <b>BGMI UID</b> and I'll instantly fetch the <b>in-game username</b> linked to it.\n\n"
+        "📌 <b>How to find your UID:</b>\n"
+        "Open BGMI → Tap your profile avatar (top-left) → Your UID is below your username.\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "Just send the UID\\.  That's it\\. ✅"
+        "Just send the UID. That's it. ✅"
     )
-    await update.message.reply_text(msg, parse_mode="MarkdownV2")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 
 async def handle_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,15 +94,15 @@ async def handle_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_valid_uid(text):
         await update.message.reply_text(
-            "⚠️ *Invalid UID*\n\nPlease send a valid BGMI UID \\(9\\-12 digit number\\)\\.",
-            parse_mode="MarkdownV2",
+            "⚠️ <b>Invalid UID</b>\n\nPlease send a valid BGMI UID (9–12 digit number).",
+            parse_mode="HTML",
             reply_to_message_id=update.message.message_id
         )
         return
 
     searching_msg = await update.message.reply_text(
-        "🔍 *Searching\\.\\.\\.*",
-        parse_mode="MarkdownV2",
+        "🔍 <b>Searching...</b>",
+        parse_mode="HTML",
         reply_to_message_id=update.message.message_id
     )
 
@@ -112,29 +112,28 @@ async def handle_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if status == "success":
         reply = (
-            "✅ *BGMI Player Found*\n"
+            "✅ <b>BGMI Player Found</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 *Username :* `{username}`\n"
-            f"🆔 *UID       :* `{text}`\n"
-            f"🌍 *Server   :* `BGMI — India`\n\n"
+            f"👤 <b>Username :</b> <code>{escape(username)}</code>\n"
+            f"🆔 <b>UID       :</b> <code>{escape(text)}</code>\n"
+            f"🌍 <b>Server   :</b> <code>BGMI — India</code>\n\n"
             "━━━━━━━━━━━━━━━━━━━━"
         )
         await update.message.reply_text(
             reply,
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_to_message_id=update.message.message_id
         )
     elif status == "token_failed":
         await update.message.reply_text(
-            "❌ *Failed to connect to BGMI servers\\.*\n\nPlease try again in a moment\\.",
-            parse_mode="MarkdownV2",
+            "❌ <b>Failed to connect to BGMI servers.</b>\n\nPlease try again in a moment.",
+            parse_mode="HTML",
             reply_to_message_id=update.message.message_id
         )
     else:
-        safe_status = status.replace("_", "\\_").replace(".", "\\.").replace("!", "\\!").replace("-", "\\-").replace("(", "\\(").replace(")", "\\)")
         await update.message.reply_text(
-            f"❌ *UID Not Found*\n\n`{text}` does not match any BGMI account\\.\n\nDouble\\-check the UID and try again\\.",
-            parse_mode="MarkdownV2",
+            f"❌ <b>UID Not Found</b>\n\n<code>{escape(text)}</code> does not match any BGMI account.\n\nDouble-check the UID and try again.",
+            parse_mode="HTML",
             reply_to_message_id=update.message.message_id
         )
 
