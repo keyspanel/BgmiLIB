@@ -11,7 +11,7 @@ from urllib.parse import unquote
 from functools import wraps
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, LinkPreviewOptions
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, LinkPreviewOptions, CopyTextButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes,
@@ -224,6 +224,34 @@ def build_inline_keyboard(key: str) -> InlineKeyboardMarkup | None:
             api_kwargs=api_kwargs if api_kwargs else None,
         )])
     return InlineKeyboardMarkup(rows) if rows else None
+
+
+def build_found_keyboard(username: str) -> InlineKeyboardMarkup:
+    """Build the keyboard for a successful lookup — Copy button first, then owner buttons."""
+    copy_btn = InlineKeyboardButton(
+        text="📋 Copy Username",
+        copy_text=CopyTextButton(text=username),
+    )
+    rows = [[copy_btn]]
+    # Append any owner-configured buttons below the Copy button
+    extra = load_buttons("found")
+    for btn in extra:
+        btn_text = btn.get("text", "").strip()
+        btn_url  = btn.get("url", "").strip()
+        if not btn_text or not btn_url:
+            continue
+        api_kwargs = {}
+        style    = btn.get("style", "").strip()
+        emoji_id = btn.get("icon_custom_emoji_id", "").strip()
+        if style in ("primary", "success", "danger"):
+            api_kwargs["style"] = style
+        if emoji_id:
+            api_kwargs["icon_custom_emoji_id"] = emoji_id
+        rows.append([InlineKeyboardButton(
+            text=btn_text, url=btn_url,
+            api_kwargs=api_kwargs if api_kwargs else None,
+        )])
+    return InlineKeyboardMarkup(rows)
 
 
 def _buttons_summary(buttons: list[dict]) -> str:
@@ -882,7 +910,7 @@ async def _lookup_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     server="BGMI — India"),
             parse_mode="HTML",
             reply_to_message_id=update.message.message_id,
-            reply_markup=build_inline_keyboard("found"),
+            reply_markup=build_found_keyboard(username),
         )
     elif api_status == "token_failed":
         print(f"[LOOKUP] CONN_FAILED  uid={user_id}  bgmi_uid={text}", flush=True)
