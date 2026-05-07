@@ -6,7 +6,7 @@ import json
 import requests
 from html import escape
 from urllib.parse import unquote
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, LinkPreviewOptions
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes,
@@ -100,20 +100,26 @@ DEFAULT_MESSAGES = {
         "⚔️ You haven't searched any UIDs.\n"
         "🎯 Send a BGMI UID to get started!"
     ),
+    "start_preview_url": "",
 }
 
 # Human-readable labels + available vars per key
 MSG_META = {
-    "start":          ("🚀 Start",           ["{mention}", "{first_name}"]),
-    "found":          ("✅ Player Found",     ["{username}", "{uid}", "{server}"]),
-    "not_found":      ("💀 UID Not Found",    ["{uid}"]),
-    "invalid_uid":    ("⚠️ Invalid UID",      []),
-    "searching":      ("🔍 Searching",        []),
-    "conn_failed":    ("❌ Conn. Failed",     []),
-    "history_header": ("📜 History Header",   ["{count}", "{max}"]),
-    "history_item":   ("⭐ History Item",     ["{num}", "{username}", "{uid}"]),
-    "history_empty":  ("📭 History Empty",    []),
+    "start":             ("🚀 Start",           ["{mention}", "{first_name}"]),
+    "found":             ("✅ Player Found",     ["{username}", "{uid}", "{server}"]),
+    "not_found":         ("💀 UID Not Found",    ["{uid}"]),
+    "invalid_uid":       ("⚠️ Invalid UID",      []),
+    "searching":         ("🔍 Searching",        []),
+    "conn_failed":       ("❌ Conn. Failed",     []),
+    "history_header":    ("📜 History Header",   ["{count}", "{max}"]),
+    "history_item":      ("⭐ History Item",     ["{num}", "{username}", "{uid}"]),
+    "history_empty":     ("📭 History Empty",    []),
+    "start_preview_url": ("🖼️ Start Image URL",  []),
 }
+
+# Keys that hold plain values (not HTML-formatted Telegram messages)
+# These get plain-text editing prompts and no button management
+PLAIN_KEYS = {"start_preview_url"}
 
 # Sample values for preview rendering
 SAMPLE = {
@@ -346,8 +352,12 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
         row = []
         for k in keys[i:i+2]:
             label, _ = MSG_META[k]
-            btn_count = len(load_buttons(k))
-            suffix = f" 🔘{btn_count}" if btn_count else ""
+            if k in PLAIN_KEYS:
+                url_val = load_messages().get(k, "").strip()
+                suffix  = " ✅" if url_val else " ➕"
+            else:
+                btn_count = len(load_buttons(k))
+                suffix = f" 🔘{btn_count}" if btn_count else ""
             row.append(InlineKeyboardButton(f"{label}{suffix}", callback_data=f"s_v_{k}"))
         rows.append(row)
     rows.append([InlineKeyboardButton("❌ Close", callback_data="s_close")])
@@ -357,6 +367,24 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
 def _view_panel_text(key: str) -> str:
     label, vars_list = MSG_META[key]
     current = load_messages().get(key, DEFAULT_MESSAGES.get(key, ""))
+
+    if key in PLAIN_KEYS:
+        url_val = current.strip()
+        status  = f"<code>{escape(url_val)}</code>" if url_val else "<i>Not set — no image shown on /start</i>"
+        return (
+            f"⚙️ <b>{label}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🖼️ <b>How it works:</b>\n"
+            "When a URL is set, Telegram renders a large image\n"
+            "<b>above</b> the /start caption using link preview.\n"
+            "This is the same technique used by SayGGBot.\n\n"
+            f"📌 <b>Current URL:</b>\n{status}\n\n"
+            "<b>Accepted URLs:</b>\n"
+            "  • Direct image link: <code>https://example.com/img.jpg</code>\n"
+            "  • Telegraph page with image\n"
+            "  • Any URL Telegram can generate a preview from\n"
+        )
+
     buttons = load_buttons(key)
 
     var_line = ""
@@ -379,6 +407,19 @@ def _view_panel_text(key: str) -> str:
 
 
 def _view_panel_keyboard(key: str) -> InlineKeyboardMarkup:
+    if key in PLAIN_KEYS:
+        current = load_messages().get(key, "").strip()
+        rows = [
+            [InlineKeyboardButton("✏️ Set URL", callback_data=f"s_et_{key}")],
+        ]
+        if current:
+            rows.append([InlineKeyboardButton("🗑️ Clear URL", callback_data=f"s_rt_{key}")])
+        rows.append([
+            InlineKeyboardButton("◀️ Back",  callback_data="s_back"),
+            InlineKeyboardButton("❌ Close", callback_data="s_close"),
+        ])
+        return InlineKeyboardMarkup(rows)
+
     buttons = load_buttons(key)
     rows = [
         [
@@ -454,13 +495,32 @@ def _style_keyboard() -> InlineKeyboardMarkup:
 # ─────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
-    mention = f'<a href="tg://user?id={user.id}">{escape(user.first_name)}</a>'
-    await update.message.reply_text(
-        get_msg("start", mention=mention, first_name=escape(user.first_name)),
-        parse_mode="HTML",
-        reply_markup=build_inline_keyboard("start"),
-    )
+    user        = update.effective_user
+    mention     = f'<a href="tg://user?id={user.id}">{escape(user.first_name)}</a>'
+    text        = get_msg("start", mention=mention, first_name=escape(user.first_name))
+    preview_url = load_messages().get("start_preview_url", "").strip()
+
+    if preview_url:
+        # Prepend zero-width space hyperlink — Telegram uses it to pick
+        # the preview image while keeping the visible text clean (SayGGBot technique)
+        text = f'<a href="{escape(preview_url)}">\u200b</a>{text}'
+        await update.message.reply_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=build_inline_keyboard("start"),
+            link_preview_options=LinkPreviewOptions(
+                is_disabled=False,
+                show_above_text=True,
+                url=preview_url,
+                prefer_large_media=True,
+            ),
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=build_inline_keyboard("start"),
+        )
 
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -674,7 +734,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ── Edit text ──
+    # ── Edit text / Set URL ──
     m = re.match(r"^s_et_(.+)$", data)
     if m:
         key = m.group(1)
@@ -684,6 +744,38 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         ud["bs_step"] = BS_EDIT_TEXT
         ud["bs_key"]  = key
+
+        if key in PLAIN_KEYS:
+            current_url = load_messages().get(key, "").strip()
+            cur_line    = (
+                f"\n📌 <b>Current URL:</b>\n<code>{escape(current_url)}</code>\n"
+                if current_url else
+                "\n📌 <b>Current URL:</b>  <i>Not set</i>\n"
+            )
+            prompt_text = (
+                f"🖼️ <b>Set Start Image URL</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Reply with the <b>image URL</b> to display above /start.\n\n"
+                "<b>How it works:</b>\n"
+                "Telegram fetches the link preview for the URL you provide\n"
+                "and shows it as a large image <b>above the /start caption</b>.\n\n"
+                "<b>Best URLs to use:</b>\n"
+                "  • Direct image: <code>https://example.com/banner.jpg</code>\n"
+                "  • Telegraph article with a banner image\n"
+                "  • Any page Telegram can generate a preview from\n"
+                f"{cur_line}\n"
+                "Reply with the new URL, or send /cancel to go back."
+            )
+            prompt = await q.message.reply_text(
+                prompt_text,
+                parse_mode="HTML",
+                reply_markup=ForceReply(
+                    selective=True,
+                    input_field_placeholder="Paste image URL here…"
+                ),
+            )
+            ud["bs_prompt_msg_id"] = prompt.message_id
+            return
 
         var_guide = ""
         if vars_list:
@@ -904,12 +996,39 @@ async def _bs_save_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _bs_clear(ud)
         return
 
+    label, _ = MSG_META.get(key, (key, []))
+
+    # Plain keys (e.g. URL fields) — save raw text, no HTML capture
+    if key in PLAIN_KEYS:
+        new_val = (update.message.text or "").strip()
+        if not re.match(r"^https?://", new_val):
+            await update.message.reply_text(
+                "⚠️ <b>Invalid URL</b>\n\n"
+                "Must start with <code>https://</code> or <code>http://</code>\n\n"
+                "Please reply with a valid image URL, or send /cancel.",
+                parse_mode="HTML",
+            )
+            return
+        msgs = load_messages()
+        msgs[key] = new_val
+        save_messages(msgs)
+        _bs_clear(ud)
+        await update.message.reply_text(
+            f"✅ <b>Start Image URL saved!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🖼️ <code>{escape(new_val)}</code>\n\n"
+            "The image will now appear <b>above</b> the /start caption\n"
+            "as a large link preview for all users.\n\n"
+            "💾 <i>Changes are live instantly.</i>",
+            parse_mode="HTML",
+            reply_markup=_view_panel_keyboard(key),
+        )
+        return
+
     new_text = _capture_html(update.message)
     msgs = load_messages()
     msgs[key] = new_text
     save_messages(msgs)
-
-    label, vars_list = MSG_META.get(key, (key, []))
 
     # Build preview with sample values
     try:
