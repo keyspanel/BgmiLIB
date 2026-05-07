@@ -14,6 +14,38 @@ HISTORY_FILE = "history.json"
 MAX_HISTORY = 10
 
 # =====================================
+# CUSTOM EMOJI HELPER
+# Telegram HTML: <tg-emoji emoji-id="ID">fallback</tg-emoji>
+# Falls back to plain emoji if custom not available
+# =====================================
+
+def em(fallback: str, emoji_id: str) -> str:
+    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
+# Gaming-themed custom emoji palette
+FIRE      = em("🔥", "5407025283456843044")
+SWORD     = em("⚔️", "5372996322873477072")
+CROWN     = em("👑", "5373141891321699077")
+TARGET    = em("🎯", "5420323339629726015")
+TROPHY    = em("🏆", "5373141891321699072")
+BOOM      = em("💥", "5420323339629726011")
+STAR      = em("⭐", "5368324170671202286")
+SHIELD    = em("🛡️", "5431456498198590681")
+ALIEN     = em("👾", "5368324170671202305")
+GAMEPAD   = em("🎮", "5372981976804366741")
+BULLET    = em("🔫", "5453902265922376870")
+SKULL     = em("💀", "5453902265922376858")
+GUN       = em("🎖️", "5373141891321699088")
+SEARCH    = em("🔍", "5431815452437257196")
+CHECK     = em("✅", "5368324170671202299")
+CROSS     = em("❌", "5447644880824181073")
+WARN      = em("⚠️", "5407025283456843050")
+SCROLL    = em("📜", "5373141891321699082")
+PIN       = em("📌", "5368324170671202320")
+ID_CARD   = em("🪪", "5431456498198590681")
+GLOBE     = em("🌍", "5420323339629726008")
+
+# =====================================
 # HISTORY STORAGE
 # =====================================
 
@@ -37,11 +69,8 @@ def add_to_history(user_id, uid, username):
     key = str(user_id)
     if key not in history:
         history[key] = []
-    # Remove duplicate if same UID exists
     history[key] = [e for e in history[key] if e["uid"] != uid]
-    # Add new entry at front
     history[key].insert(0, {"uid": uid, "username": username})
-    # Keep only last MAX_HISTORY
     history[key] = history[key][:MAX_HISTORY]
     save_history(history)
 
@@ -119,13 +148,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mention = f'<a href="tg://user?id={user.id}">{escape(user.first_name)}</a>'
 
     msg = (
-        f"Hey {mention} !\n"
-        "Send me any <b>BGMI UID</b> and I'll instantly fetch the in-game username linked to it.\n\n"
-        "📌 <b>How to find your UID:</b>\n"
-        "Open BGMI → Tap your profile avatar (top-left) → Your UID is below your username.\n\n"
+        f"{FIRE} <b>BGMI ID LOOKUP</b> {FIRE}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{CROWN} Hey {mention} !\n\n"
+        f"{SWORD} Send me a <b>BGMI UID</b> and I'll instantly reveal the player name.\n\n"
+        f"{PIN} <b>How to find your UID:</b>\n"
+        f"Open BGMI {GAMEPAD} → Profile icon (top-left) → Number below your name\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "Just send the UID. That's it. ✅\n\n"
-        "📜 Use /history to see your last 10 lookups."
+        f"{TARGET} Send UID. Get name. Done.\n"
+        f"{SCROLL} /history — Your last 10 lookups"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -135,21 +166,24 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     entries = get_history(user.id)
 
     if not entries:
-        await update.message.reply_text(
-            "📭 <b>No History Found</b>\n\nYou haven't looked up any UIDs yet.\nSend a BGMI UID to get started!",
-            parse_mode="HTML"
+        msg = (
+            f"{SCROLL} <b>No History Yet</b>\n\n"
+            f"{SWORD} You haven't looked up any UIDs yet.\n"
+            f"{TARGET} Send a BGMI UID to get started!"
         )
+        await update.message.reply_text(msg, parse_mode="HTML")
         return
 
-    lines = ["📜 <b>Your Last Lookups</b>\n━━━━━━━━━━━━━━━━━━━━\n"]
+    lines = [f"{SCROLL} <b>Your Last Lookups</b>\n━━━━━━━━━━━━━━━━━━━━\n"]
     for i, entry in enumerate(entries, 1):
         lines.append(
-            f"<b>{i}.</b> 👤 <code>{escape(entry['username'])}</code>\n"
-            f"     🆔 <code>{escape(entry['uid'])}</code>"
+            f"{STAR} <b>{i}.</b>  "
+            f"{CROWN} <code>{escape(entry['username'])}</code>\n"
+            f"      {ID_CARD} <code>{escape(entry['uid'])}</code>"
         )
 
-    lines.append("\n━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"<i>Showing {len(entries)} of last {MAX_HISTORY} lookups.</i>")
+    lines.append(f"\n━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"<i>{SHIELD} {len(entries)} of {MAX_HISTORY} slots used</i>")
 
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
@@ -158,15 +192,19 @@ async def handle_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     if not is_valid_uid(text):
+        msg = (
+            f"{WARN} <b>Invalid UID</b>\n\n"
+            f"{TARGET} Please send a valid BGMI UID (9–12 digit number)."
+        )
         await update.message.reply_text(
-            "⚠️ <b>Invalid UID</b>\n\nPlease send a valid BGMI UID (9–12 digit number).",
+            msg,
             parse_mode="HTML",
             reply_to_message_id=update.message.message_id
         )
         return
 
     searching_msg = await update.message.reply_text(
-        "🔍 <b>Searching...</b>",
+        f"{SEARCH} <b>Searching player...</b>",
         parse_mode="HTML",
         reply_to_message_id=update.message.message_id
     )
@@ -177,13 +215,13 @@ async def handle_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if status == "success":
         add_to_history(update.effective_user.id, text, username)
         reply = (
-            "✅ <b>BGMI Player Found</b>\n"
+            f"{BOOM} <b>BGMI Player Found</b> {TROPHY}\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 <b>Username :</b> <code>{escape(username)}</code>\n"
-            f"🆔 <b>UID       :</b> <code>{escape(text)}</code>\n"
-            f"🌍 <b>Server   :</b> BGMI — India\n\n"
+            f"{CROWN} <b>Username :</b>  <code>{escape(username)}</code>\n"
+            f"{ID_CARD} <b>UID           :</b>  <code>{escape(text)}</code>\n"
+            f"{GLOBE} <b>Server      :</b>  BGMI — India\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            "<i>Tap username or UID to copy.</i>"
+            f"<i>{TARGET} Tap username or UID to copy.</i>"
         )
         await update.message.reply_text(
             reply,
@@ -191,14 +229,24 @@ async def handle_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_to_message_id=update.message.message_id
         )
     elif status == "token_failed":
+        msg = (
+            f"{CROSS} <b>Connection Failed</b>\n\n"
+            f"{SHIELD} Could not reach BGMI servers.\n"
+            f"{TARGET} Please try again in a moment."
+        )
         await update.message.reply_text(
-            "❌ <b>Failed to connect to BGMI servers.</b>\n\nPlease try again in a moment.",
+            msg,
             parse_mode="HTML",
             reply_to_message_id=update.message.message_id
         )
     else:
+        msg = (
+            f"{SKULL} <b>UID Not Found</b>\n\n"
+            f"{ID_CARD} <code>{escape(text)}</code> has no linked BGMI account.\n\n"
+            f"{TARGET} Double-check the UID and try again."
+        )
         await update.message.reply_text(
-            f"❌ <b>UID Not Found</b>\n\n<code>{escape(text)}</code> does not match any BGMI account.\n\nDouble-check the UID and try again.",
+            msg,
             parse_mode="HTML",
             reply_to_message_id=update.message.message_id
         )
