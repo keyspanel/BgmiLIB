@@ -1,0 +1,11 @@
+{
+  "start": "55509363712",
+  "found": "💥 <b>Player Found!</b> 🏆\n━━━━━━━━━━━━━━━━━━━━\n\n👑 <b>Username :</b>  <code>{username}</code>\n🪪 <b>UID          :</b>  <code>{uid}</code>\n🌍 <b>Server    :</b>  {server}\n\n━━━━━━━━━━━━━━━━━━━━\n<i>🎯 Tap username or UID to copy.</i>",
+  "not_found": "💀 <b>UID Not Found</b>\n\n🪪 <code>{uid}</code> has no linked BGMI account.\n\n🎯 Double-check the UID and try again.",
+  "invalid_uid": "⚠️ <b>Invalid UID</b>\n\n🎯 Send a valid BGMI UID (9–12 digits only).",
+  "searching": "🔍 <b>Searching player...</b>",
+  "conn_failed": "❌ <b>Connection Failed</b>\n\n🛡️ Could not reach BGMI servers.\n⚡ Please try again in a moment.",
+  "history_header": "📜 <b>Your Last Lookups</b>\n━━━━━━━━━━━━━━━━━━━━",
+  "history_item": "⭐ <b>{num}.</b>\n   👑 <code>{username}</code>\n   🪪 <code>{uid}</code>",
+  "history_empty": "📜 <b>No History Yet</b>\n\n⚔️ You haven't searched any UIDs.\n🎯 Send a BGMI UID to get started!"
+}

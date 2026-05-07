@@ -6,7 +6,7 @@ import json
 import requests
 from html import escape
 from urllib.parse import unquote
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters, ContextTypes,
@@ -391,16 +391,25 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if avail_vars != "—" else ""
         )
 
-        prompt = (
+        # Update the menu message to show context (no keyboard)
+        context_msg = (
             f"✏️ <b>Editing: {label}</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "📄 <b>Current message:</b>\n"
             f"<blockquote>{escape(current)}</blockquote>\n\n"
             f"{var_line}"
-            "Send the <b>new message text</b> below.\n"
+            "⬇️ <b>Reply to the message below with your new text.</b>\n"
             "Type /cancel to go back."
         )
-        await q.message.edit_text(prompt, parse_mode="HTML")
+        await q.message.edit_text(context_msg, parse_mode="HTML")
+
+        # Send a ForceReply prompt the owner must reply to
+        force_msg = await q.message.reply_text(
+            f"✏️ <b>Send new text for:</b> {label}",
+            parse_mode="HTML",
+            reply_markup=ForceReply(selective=True, input_field_placeholder=f"New text for {label}..."),
+        )
+        context.user_data["force_reply_msg_id"] = force_msg.message_id
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
